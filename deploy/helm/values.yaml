@@ -1,0 +1,174 @@
+# Nightjar Helm Values
+# See docs/ARCHITECTURE.md for detailed descriptions.
+
+# -- Controller configuration
+controller:
+  replicas: 2
+  image:
+    repository: ghcr.io/yourorg/nightjar
+    tag: ""  # Defaults to appVersion
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # -- Leader election (recommended for HA)
+  leaderElect: true
+  # -- How often to rescan for newly installed CRDs
+  rescanInterval: 5m
+  # -- Additional args passed to the controller binary
+  extraArgs: []
+  # -- Node selector
+  nodeSelector: {}
+  # -- Tolerations
+  tolerations: []
+  # -- Pod affinity/anti-affinity
+  affinity: {}
+  # -- Pod annotations
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+
+# -- Admission webhook configuration (separate deployment)
+admissionWebhook:
+  enabled: true
+  replicas: 2
+  # -- MUST be Ignore for safety. Never set to Fail.
+  failurePolicy: Ignore
+  image:
+    repository: ghcr.io/yourorg/nightjar-webhook
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  # -- PodDisruptionBudget
+  pdb:
+    enabled: true
+    minAvailable: 1
+  # -- Certificate management: "cert-manager" or "self-signed"
+  certManagement: self-signed
+
+# -- Adapter auto-detection
+# "auto" = enable if CRDs exist; "enabled" = always; "disabled" = never
+adapters:
+  networkpolicy:
+    enabled: true  # Always available (native K8s)
+  resourcequota:
+    enabled: true  # Always available (native K8s)
+  webhook:
+    enabled: true  # Always available (native K8s)
+  cilium:
+    enabled: auto
+  gatekeeper:
+    enabled: auto
+  kyverno:
+    enabled: auto
+  istio:
+    enabled: auto
+  prometheus:
+    enabled: auto
+
+# -- Hubble integration (requires Cilium with Hubble enabled)
+hubble:
+  enabled: false
+  relayAddress: hubble-relay.kube-system.svc:4245
+
+# -- Missing resource detection
+requirements:
+  enabled: true
+  # -- Seconds to wait before alerting on missing resources (avoids false positives during sync)
+  debounceSeconds: 120
+
+# -- Notification configuration
+notifications:
+  # -- Kubernetes Events on affected workloads (always recommended)
+  kubernetesEvents: true
+  # -- ConstraintReport CRD per namespace
+  constraintReports: true
+  # -- Rate limit: max events per minute per namespace
+  rateLimitPerMinute: 100
+  # -- Slack integration
+  slack:
+    enabled: false
+    webhookUrl: ""
+    minSeverity: Critical
+  # -- Generic webhook
+  webhook:
+    enabled: false
+    url: ""
+  # -- Notification deduplication
+  deduplication:
+    enabled: true
+    # -- Don't re-notify for the same constraint unless it changes
+    suppressDuplicateMinutes: 60
+
+# -- Privacy and detail level configuration
+privacy:
+  # -- Default detail level for developer-facing notifications
+  defaultDeveloperDetailLevel: summary
+  # -- Show constraint names from other namespaces
+  showCrossNamespacePolicyNames: false
+  # -- Show specific port numbers in developer notifications
+  showPortNumbers: false
+  # -- Default contact for remediation hints
+  remediationContact: ""
+
+# -- RBAC
+rbac:
+  create: true
+
+# -- ServiceAccount
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- Monitoring
+monitoring:
+  # -- ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+  # -- Grafana dashboard ConfigMap
+  grafanaDashboard:
+    enabled: false
+
+# -- MCP Server (Model Context Protocol for AI agent integration)
+mcp:
+  enabled: false
+  port: 8090
+  # -- Transport: "sse" for remote agents, "stdio" for local agents
+  transport: sse
+  # -- Authentication for MCP clients
+  authentication:
+    # -- "bearer-token" for external agents, "kubernetes-sa" for in-cluster agents
+    method: kubernetes-sa
+
+# -- Workload annotations (annotate affected Deployments/StatefulSets with constraint summaries)
+workloadAnnotations:
+  enabled: true
+  # -- Which workload kinds to annotate
+  kinds:
+    - Deployment
+    - StatefulSet
+    - DaemonSet
+  # -- Max number of constraints to include in the JSON annotation (prevents oversized annotations)
+  maxConstraintsPerWorkload: 20
+
+# -- kubectl plugin
+kubectlPlugin:
+  # -- Install kubectl-sentinel plugin via Krew (future)
+  installInstructions: "go install github.com/nightjarctl/nightjar/cmd/kubectl-sentinel@latest"
+
+# -- API server (serves /api/v1/health, /api/v1/capabilities, /openapi/v3)
+apiServer:
+  enabled: true
+  port: 8092

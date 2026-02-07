@@ -1,0 +1,54 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+cover.out
+coverage.html
+*.test
+*.out
+
+# Go
+vendor/
+go.work
+go.work.sum
+
+# Build cache
+.cache/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Helm
+deploy/helm/charts/
+*.tgz
+
+# Generated CRDs (regenerate with make manifests)
+config/crd/*.yaml
+
+# Local environment
+.env
+.env.local
+*.local
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Debug
+__debug_bin*

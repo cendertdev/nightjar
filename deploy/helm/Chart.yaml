@@ -1,0 +1,21 @@
+apiVersion: v2
+name: nightjar
+description: Automatic constraint discovery and developer notification for Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - policy
+  - notification
+  - developer-experience
+  - constraint
+  - network-policy
+  - gatekeeper
+  - kyverno
+  - cilium
+home: https://github.com/nightjarctl/nightjar
+sources:
+  - https://github.com/nightjarctl/nightjar
+maintainers:
+  - name: yourorg
