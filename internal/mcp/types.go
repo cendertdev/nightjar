@@ -1,6 +1,12 @@
 package mcp
 
 import (
+	"fmt"
+	"strings"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -154,8 +160,195 @@ type MetricValue struct {
 }
 
 // ToConstraintResult converts an internal Constraint to an MCP-friendly result.
-// IMPLEMENT: Map all fields, apply privacy scoping based on detailLevel.
-func ToConstraintResult(c types.Constraint, detailLevel types.DetailLevel) ConstraintResult {
-	// IMPLEMENT
-	return ConstraintResult{}
+// Applies privacy scoping based on detailLevel.
+func ToConstraintResult(c types.Constraint, detailLevel types.DetailLevel, viewerNamespace string) ConstraintResult {
+	result := ConstraintResult{
+		ConstraintType: string(c.ConstraintType),
+		Severity:       string(c.Severity),
+		Effect:         c.Effect,
+		Tags:           c.Tags,
+		DetailLevel:    string(detailLevel),
+		LastObserved:   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Apply privacy scoping to name
+	result.Name = scopedConstraintName(c, detailLevel, viewerNamespace)
+
+	// Apply privacy scoping to namespace
+	if canShowNamespace(c, detailLevel, viewerNamespace) {
+		result.Namespace = c.Namespace
+	}
+
+	// Source info
+	result.SourceKind = gvrToKind(c.Source)
+	result.SourceAPIVersion = gvrToAPIVersion(c.Source)
+
+	// Extract metrics for resource constraints at detailed+ level
+	if c.ConstraintType == types.ConstraintTypeResourceLimit {
+		if detailLevel == types.DetailLevelDetailed || detailLevel == types.DetailLevelFull {
+			result.Metrics = extractMetrics(c)
+		}
+	}
+
+	return result
+}
+
+// ToConstraintResultWithRemediation includes remediation info in the result.
+func ToConstraintResultWithRemediation(c types.Constraint, detailLevel types.DetailLevel, viewerNamespace string, remediationBuilder RemediationBuilder) ConstraintResult {
+	result := ToConstraintResult(c, detailLevel, viewerNamespace)
+
+	remediation := remediationBuilder(c)
+	result.Remediation = &RemediationResult{
+		Summary: remediation.Summary,
+	}
+
+	for _, step := range remediation.Steps {
+		result.Remediation.Steps = append(result.Remediation.Steps, RemediationStep{
+			Type:              step.Type,
+			Description:       step.Description,
+			Command:           step.Command,
+			Patch:             step.Patch,
+			Template:          step.Template,
+			URL:               step.URL,
+			Contact:           step.Contact,
+			RequiresPrivilege: step.RequiresPrivilege,
+			Automated:         step.Type == "kubectl" || step.Type == "annotation",
+		})
+	}
+
+	return result
+}
+
+// RemediationBuilder is a function that builds remediation info from a constraint.
+type RemediationBuilder func(c types.Constraint) RemediationInfo
+
+// RemediationInfo is used internally for building remediation.
+type RemediationInfo struct {
+	Summary string
+	Steps   []RemediationStepInfo
+}
+
+// RemediationStepInfo is the internal step representation.
+type RemediationStepInfo struct {
+	Type              string
+	Description       string
+	Command           string
+	Patch             string
+	Template          string
+	URL               string
+	Contact           string
+	RequiresPrivilege string
+}
+
+// scopedConstraintName returns the constraint name based on privacy level.
+func scopedConstraintName(c types.Constraint, level types.DetailLevel, viewerNamespace string) string {
+	if level == types.DetailLevelSummary {
+		if c.Namespace == "" || c.Namespace != viewerNamespace {
+			return "redacted"
+		}
+	}
+	return c.Name
+}
+
+// canShowNamespace returns true if the constraint namespace can be shown.
+func canShowNamespace(c types.Constraint, level types.DetailLevel, viewerNamespace string) bool {
+	if level == types.DetailLevelSummary {
+		return c.Namespace == viewerNamespace
+	}
+	if level == types.DetailLevelDetailed {
+		return c.Namespace == "" || c.Namespace == viewerNamespace
+	}
+	return true
+}
+
+// gvrToKind converts a GVR resource name to a Kind name.
+func gvrToKind(gvr schema.GroupVersionResource) string {
+	switch gvr.Resource {
+	case "networkpolicies":
+		return "NetworkPolicy"
+	case "resourcequotas":
+		return "ResourceQuota"
+	case "limitranges":
+		return "LimitRange"
+	case "validatingwebhookconfigurations":
+		return "ValidatingWebhookConfiguration"
+	case "mutatingwebhookconfigurations":
+		return "MutatingWebhookConfiguration"
+	case "ciliumnetworkpolicies":
+		return "CiliumNetworkPolicy"
+	case "ciliumclusterwidenetworkpolicies":
+		return "CiliumClusterwideNetworkPolicy"
+	default:
+		// Generic handling
+		resource := gvr.Resource
+		if len(resource) > 1 && resource[len(resource)-1] == 's' {
+			resource = resource[:len(resource)-1]
+		}
+		if len(resource) > 0 {
+			return string(resource[0]-32) + resource[1:]
+		}
+		return resource
+	}
+}
+
+// gvrToAPIVersion converts a GVR to an API version string.
+func gvrToAPIVersion(gvr schema.GroupVersionResource) string {
+	if gvr.Group == "" {
+		return gvr.Version
+	}
+	return fmt.Sprintf("%s/%s", gvr.Group, gvr.Version)
+}
+
+// extractMetrics extracts resource metrics from constraint details.
+func extractMetrics(c types.Constraint) map[string]MetricValue {
+	if c.Details == nil {
+		return nil
+	}
+
+	resources, ok := c.Details["resources"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	metrics := make(map[string]MetricValue)
+	for name, infoRaw := range resources {
+		info, ok := infoRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		metric := MetricValue{
+			Unit: guessUnit(name),
+		}
+
+		if hard, ok := info["hard"].(string); ok {
+			metric.Hard = hard
+		}
+		if used, ok := info["used"].(string); ok {
+			metric.Used = used
+		}
+		if percent, ok := info["percent"].(int); ok {
+			metric.PercentUsed = float64(percent)
+		} else if percentFloat, ok := info["percent"].(float64); ok {
+			metric.PercentUsed = percentFloat
+		}
+
+		metrics[name] = metric
+	}
+
+	return metrics
+}
+
+// guessUnit returns the unit for a resource name.
+func guessUnit(resourceName string) string {
+	switch {
+	case resourceName == "cpu" || strings.HasSuffix(resourceName, ".cpu"):
+		return "cores"
+	case resourceName == "memory" || strings.HasSuffix(resourceName, ".memory"):
+		return "bytes"
+	case strings.Contains(resourceName, "storage"):
+		return "bytes"
+	default:
+		return "count"
+	}
 }

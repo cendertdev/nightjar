@@ -1,17 +1,17 @@
-// nightjarctl is a CLI tool for querying Nightjar constraint data.
+// nightjar-sentinel is a CLI tool for querying Nightjar constraint data.
 //
 // Installation:
 //
-//	go build -o nightjar ./cmd/nightjarctl
-//	mv nightjar /usr/local/bin/
+//	go build -o nightjar-sentinel ./cmd/nightjar-sentinel
+//	mv nightjar-sentinel /usr/local/bin/
 //
 // Usage:
 //
-//	nightjar query -n my-namespace
-//	nightjar explain -n my-namespace "connection refused"
-//	nightjar check -f manifest.yaml
-//	nightjar remediate -n my-namespace my-constraint
-//	nightjar status
+//	nightjar-sentinel query -n my-namespace
+//	nightjar-sentinel explain -n my-namespace "connection refused"
+//	nightjar-sentinel check -f manifest.yaml
+//	nightjar-sentinel remediate -n my-namespace my-constraint
+//	nightjar-sentinel status
 package main
 
 import (
@@ -28,9 +28,9 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "nightjar",
+		Use:   "nightjar-sentinel",
 		Short: "Query and explain Nightjar constraints",
-		Long: `nightjar is a CLI tool for interacting with Nightjar.
+		Long: `nightjar-sentinel is a CLI tool for interacting with Nightjar.
 
 It reads ConstraintReport CRDs and Events directly from the cluster,
 providing structured JSON output that matches MCP response schemas.`,
