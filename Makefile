@@ -148,6 +148,12 @@ verify-phase-1: ## Verify Phase 1 completion
 setup: ## Install all development tools
 	bash hack/setup.sh
 
+##@ Documentation
+
+.PHONY: docs
+docs: ## Serve documentation locally at http://localhost:4000/nightjar/
+	docker run --rm -p 4000:4000 -v $(CURDIR)/docs:/site bretfisher/jekyll-serve
+
 ##@ Help
 
 .PHONY: help

@@ -51,3 +51,11 @@ temp/
 
 # Debug
 __debug_bin*
+
+# Jekyll/Docs (generated on build)
+docs/_site/
+docs/.jekyll-cache/
+docs/.jekyll-metadata
+docs/.sass-cache/
+docs/Gemfile.lock
+docs/.bundle/
