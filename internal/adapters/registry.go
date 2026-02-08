@@ -14,6 +14,7 @@ type Registry struct {
 	mu       sync.RWMutex
 	adapters map[string]types.Adapter                      // name → adapter
 	gvrMap   map[schema.GroupVersionResource]types.Adapter // GVR → adapter
+	groupMap map[string]types.Adapter                      // group → first adapter (for dynamic CRDs)
 }
 
 // NewRegistry creates an empty adapter registry.
@@ -22,6 +23,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		adapters: make(map[string]types.Adapter),
 		gvrMap:   make(map[schema.GroupVersionResource]types.Adapter),
+		groupMap: make(map[string]types.Adapter),
 	}
 }
 
@@ -43,6 +45,12 @@ func (r *Registry) Register(adapter types.Adapter) error {
 				gvr.String(), existing.Name(), name)
 		}
 		r.gvrMap[gvr] = adapter
+
+		// Index by group - first adapter for each group wins.
+		// This enables O(1) lookup for dynamic CRDs like Gatekeeper constraints.
+		if _, exists := r.groupMap[gvr.Group]; !exists {
+			r.groupMap[gvr.Group] = adapter
+		}
 	}
 
 	r.adapters[name] = adapter
@@ -85,4 +93,15 @@ func (r *Registry) HandledGVRs() []schema.GroupVersionResource {
 		result = append(result, gvr)
 	}
 	return result
+}
+
+// ForGroup returns the adapter that handles resources in the given API group.
+// This is useful for policy engines like Gatekeeper that create CRDs dynamically
+// (e.g., k8srequiredlabels.constraints.gatekeeper.sh).
+// Returns nil if no adapter handles resources in that group.
+// Note: If multiple adapters handle the same group, the first registered wins.
+func (r *Registry) ForGroup(group string) types.Adapter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.groupMap[group]
 }

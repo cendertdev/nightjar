@@ -38,6 +38,11 @@ admissionWebhook:
   replicas: 2
   # -- MUST be Ignore for safety. Never set to Fail.
   failurePolicy: Ignore
+  # -- Webhook timeout in seconds (short to avoid slowing deployments)
+  timeoutSeconds: 5
+  # -- Namespaces to exclude from webhook validation
+  excludedNamespaces:
+    - nightjar-system
   image:
     repository: ghcr.io/yourorg/nightjar-webhook
     tag: ""
@@ -55,6 +60,18 @@ admissionWebhook:
     minAvailable: 1
   # -- Certificate management: "cert-manager" or "self-signed"
   certManagement: self-signed
+  # -- cert-manager configuration (when certManagement is "cert-manager")
+  certManager:
+    # -- Override issuer reference
+    issuerRef: {}
+    # -- Issuer name (if not using issuerRef)
+    issuerName: ""
+    # -- Issuer kind (ClusterIssuer or Issuer)
+    issuerKind: ClusterIssuer
+    # -- Certificate duration
+    duration: 8760h  # 1 year
+    # -- Renew before expiry
+    renewBefore: 720h  # 30 days
 
 # -- Adapter auto-detection
 # "auto" = enable if CRDs exist; "enabled" = always; "disabled" = never

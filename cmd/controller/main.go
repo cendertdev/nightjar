@@ -16,6 +16,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/nightjarctl/nightjar/internal/adapters"
+	"github.com/nightjarctl/nightjar/internal/adapters/gatekeeper"
+	"github.com/nightjarctl/nightjar/internal/adapters/kyverno"
 	"github.com/nightjarctl/nightjar/internal/adapters/limitrange"
 	"github.com/nightjarctl/nightjar/internal/adapters/networkpolicy"
 	"github.com/nightjarctl/nightjar/internal/adapters/resourcequota"
@@ -89,6 +91,8 @@ func main() {
 	mustRegister(logger, registry, resourcequota.New())
 	mustRegister(logger, registry, limitrange.New())
 	mustRegister(logger, registry, webhookconfig.New())
+	mustRegister(logger, registry, gatekeeper.New())
+	mustRegister(logger, registry, kyverno.New())
 
 	logger.Info("Adapter registry initialized",
 		zap.Int("adapter_count", len(registry.All())),

@@ -262,8 +262,14 @@ func (e *Engine) handleDelete(gvr schema.GroupVersionResource, obj interface{}) 
 
 // parseObject routes the object to the appropriate adapter.
 func (e *Engine) parseObject(ctx context.Context, gvr schema.GroupVersionResource, obj *unstructured.Unstructured) ([]types.Constraint, error) {
-	// Try specific adapter first
+	// Try specific GVR adapter first
 	adapter := e.registry.ForGVR(gvr)
+	if adapter != nil {
+		return adapter.Parse(ctx, obj)
+	}
+
+	// Try group-based matching (for dynamic CRDs like Gatekeeper constraints)
+	adapter = e.registry.ForGroup(gvr.Group)
 	if adapter != nil {
 		return adapter.Parse(ctx, obj)
 	}

@@ -1,0 +1,16 @@
+{{- if and .Values.admissionWebhook.enabled (gt (int .Values.admissionWebhook.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "nightjar.fullname" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nightjar.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "nightjar.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: webhook
+{{- end }}

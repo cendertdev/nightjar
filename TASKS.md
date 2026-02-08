@@ -363,18 +363,18 @@ These tasks make Nightjar's runtime outputs consumable by AI agents, kubectl plu
 
 ## Phase 2: Cilium + Hubble
 
-- [ ] **TASK-2.1**: Implement Cilium NetworkPolicy adapter
-- [ ] **TASK-2.2**: Implement CiliumClusterwideNetworkPolicy adapter
-- [ ] **TASK-2.3**: Implement Hubble flow client
-- [ ] **TASK-2.4**: Implement flow-to-constraint correlation
-- [ ] **TASK-2.5**: Build service map from Service/Endpoint objects
+- [x] **TASK-2.1**: Implement Cilium NetworkPolicy adapter
+- [x] **TASK-2.2**: Implement CiliumClusterwideNetworkPolicy adapter
+- [x] **TASK-2.3**: Implement Hubble flow client
+- [x] **TASK-2.4**: Implement flow-to-constraint correlation
+- [x] **TASK-2.5**: Build service map from Service/Endpoint objects
 - [ ] **TASK-2.6**: Integration test with Cilium in Kind
 
 ## Phase 3: Gatekeeper + Kyverno + Webhook
 
-- [ ] **TASK-3.1**: Implement Gatekeeper constraint adapter
-- [ ] **TASK-3.2**: Implement Kyverno policy adapter
-- [ ] **TASK-3.3**: Implement admission webhook (warning mode)
-- [ ] **TASK-3.4**: Webhook certificate management
-- [ ] **TASK-3.5**: Integration test with Gatekeeper
-- [ ] **TASK-3.6**: Integration test with Kyverno
+- [x] **TASK-3.1**: Implement Gatekeeper constraint adapter
+- [x] **TASK-3.2**: Implement Kyverno policy adapter
+- [x] **TASK-3.3**: Implement admission webhook (warning mode)
+- [x] **TASK-3.4**: Webhook certificate management
+- [x] **TASK-3.5**: Integration test with Gatekeeper
+- [x] **TASK-3.6**: Integration test with Kyverno
