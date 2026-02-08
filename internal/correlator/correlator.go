@@ -2,6 +2,7 @@ package correlator
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/nightjarctl/nightjar/internal/hubble"
 	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
@@ -37,6 +39,28 @@ type CorrelatedNotification struct {
 	WorkloadKind string
 }
 
+// FlowDropNotification pairs a Hubble flow drop with a matching constraint.
+type FlowDropNotification struct {
+	FlowDrop   hubble.FlowDrop
+	Constraint types.Constraint
+
+	// Source pod information
+	SourceNamespace string
+	SourcePodName   string
+	SourceWorkload  string
+	SourceLabels    map[string]string
+
+	// Destination pod information
+	DestNamespace string
+	DestPodName   string
+	DestWorkload  string
+	DestLabels    map[string]string
+
+	// Connection information
+	DestPort uint32
+	Protocol string
+}
+
 // dedupeKey uniquely identifies an event-constraint pair.
 type dedupeKey struct {
 	eventUID      string
@@ -48,20 +72,35 @@ type Correlator struct {
 	logger        *zap.Logger
 	client        kubernetes.Interface
 	indexer       *indexer.Indexer
+	hubbleClient  *hubble.Client
 	notifications chan CorrelatedNotification
+	flowDrops     chan FlowDropNotification
 	limiter       *rate.Limiter
 
 	mu        sync.RWMutex
 	seenPairs map[dedupeKey]time.Time
 }
 
+// CorrelatorOptions configures the Correlator.
+type CorrelatorOptions struct {
+	// HubbleClient is optional; if nil, Hubble flow correlation is disabled.
+	HubbleClient *hubble.Client
+}
+
 // New creates a new Correlator.
 func New(idx *indexer.Indexer, client kubernetes.Interface, logger *zap.Logger) *Correlator {
+	return NewWithOptions(idx, client, logger, CorrelatorOptions{})
+}
+
+// NewWithOptions creates a new Correlator with options.
+func NewWithOptions(idx *indexer.Indexer, client kubernetes.Interface, logger *zap.Logger, opts CorrelatorOptions) *Correlator {
 	return &Correlator{
 		logger:        logger.Named("correlator"),
 		client:        client,
 		indexer:       idx,
+		hubbleClient:  opts.HubbleClient,
 		notifications: make(chan CorrelatedNotification, notificationBuffer),
+		flowDrops:     make(chan FlowDropNotification, notificationBuffer),
 		limiter:       rate.NewLimiter(eventRateLimit, eventRateBurst),
 		seenPairs:     make(map[dedupeKey]time.Time),
 	}
@@ -72,6 +111,11 @@ func (c *Correlator) Notifications() <-chan CorrelatedNotification {
 	return c.notifications
 }
 
+// FlowDropNotifications returns the channel of flow drop notifications.
+func (c *Correlator) FlowDropNotifications() <-chan FlowDropNotification {
+	return c.flowDrops
+}
+
 // Start begins watching events and correlating them. Blocks until context is cancelled.
 func (c *Correlator) Start(ctx context.Context) error {
 	c.logger.Info("Starting correlator")
@@ -79,11 +123,18 @@ func (c *Correlator) Start(ctx context.Context) error {
 	// Start dedupe cleaner
 	go c.cleanupDedupeCache(ctx)
 
+	// Start Hubble flow processor if configured
+	if c.hubbleClient != nil {
+		go c.processFlowDrops(ctx)
+		c.logger.Info("Hubble flow correlation enabled")
+	}
+
 	for {
 		if err := c.watchEvents(ctx); err != nil {
 			if ctx.Err() != nil {
 				c.logger.Info("Correlator stopped")
 				close(c.notifications)
+				close(c.flowDrops)
 				return nil
 			}
 			c.logger.Error("Event watch failed, retrying", zap.Error(err))
@@ -206,4 +257,150 @@ func (c *Correlator) cleanupDedupeCache(ctx context.Context) {
 			c.mu.Unlock()
 		}
 	}
+}
+
+// processFlowDrops reads from the Hubble client and correlates flow drops with constraints.
+func (c *Correlator) processFlowDrops(ctx context.Context) {
+	if c.hubbleClient == nil {
+		return
+	}
+
+	drops := c.hubbleClient.DroppedFlows()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case drop, ok := <-drops:
+			if !ok {
+				c.logger.Info("Hubble flow channel closed")
+				return
+			}
+			c.handleFlowDrop(ctx, drop)
+		}
+	}
+}
+
+// handleFlowDrop processes a single Hubble flow drop event.
+func (c *Correlator) handleFlowDrop(ctx context.Context, drop hubble.FlowDrop) {
+	// Only process policy-related drops
+	if !drop.DropReason.IsPolicyDrop() {
+		return
+	}
+
+	// Rate limit
+	if !c.limiter.Allow() {
+		c.logger.Debug("Flow drop rate limited",
+			zap.String("source", drop.Source.PodName),
+			zap.String("dest", drop.Destination.PodName))
+		return
+	}
+
+	// Try to correlate with both source and destination namespaces
+	namespaces := []string{}
+	if drop.Source.Namespace != "" {
+		namespaces = append(namespaces, drop.Source.Namespace)
+	}
+	if drop.Destination.Namespace != "" && drop.Destination.Namespace != drop.Source.Namespace {
+		namespaces = append(namespaces, drop.Destination.Namespace)
+	}
+
+	if len(namespaces) == 0 {
+		return
+	}
+
+	for _, ns := range namespaces {
+		c.correlateFlowDropInNamespace(ctx, drop, ns)
+	}
+}
+
+// correlateFlowDropInNamespace correlates a flow drop with constraints in a specific namespace.
+func (c *Correlator) correlateFlowDropInNamespace(ctx context.Context, drop hubble.FlowDrop, namespace string) {
+	// Query constraints for this namespace
+	constraints := c.indexer.ByNamespace(namespace)
+	if len(constraints) == 0 {
+		return
+	}
+
+	// Determine which labels to match based on namespace
+	var matchLabels map[string]string
+	if namespace == drop.Source.Namespace {
+		matchLabels = drop.Source.Labels
+	} else {
+		matchLabels = drop.Destination.Labels
+	}
+
+	// Try to find matching network policy constraints
+	for _, constraint := range constraints {
+		// Only correlate with network-related constraints
+		if constraint.ConstraintType != types.ConstraintTypeNetworkIngress &&
+			constraint.ConstraintType != types.ConstraintTypeNetworkEgress {
+			continue
+		}
+
+		// Check if the constraint's workload selector matches the pod
+		if !matchesSelector(constraint.WorkloadSelector, matchLabels) {
+			continue
+		}
+
+		// Dedupe check using flow details as the key
+		flowKey := fmt.Sprintf("flow:%s:%s:%s:%d",
+			drop.Source.PodName, drop.Destination.PodName,
+			drop.L4.Protocol, drop.L4.DestinationPort)
+		key := dedupeKey{
+			eventUID:      flowKey,
+			constraintUID: string(constraint.UID),
+		}
+		if c.isDuplicate(key) {
+			continue
+		}
+
+		// Build the notification
+		notification := FlowDropNotification{
+			FlowDrop:        drop,
+			Constraint:      constraint,
+			SourceNamespace: drop.Source.Namespace,
+			SourcePodName:   drop.Source.PodName,
+			SourceLabels:    drop.Source.Labels,
+			DestNamespace:   drop.Destination.Namespace,
+			DestPodName:     drop.Destination.PodName,
+			DestLabels:      drop.Destination.Labels,
+			DestPort:        drop.L4.DestinationPort,
+			Protocol:        string(drop.L4.Protocol),
+		}
+
+		// Extract workload names from workload refs
+		if len(drop.Source.Workloads) > 0 {
+			notification.SourceWorkload = drop.Source.Workloads[0].Name
+		}
+		if len(drop.Destination.Workloads) > 0 {
+			notification.DestWorkload = drop.Destination.Workloads[0].Name
+		}
+
+		select {
+		case c.flowDrops <- notification:
+			c.markSeen(key)
+		case <-ctx.Done():
+			return
+		default:
+			c.logger.Warn("Flow drop notification channel full")
+		}
+	}
+}
+
+// matchesSelector checks if the given labels match the selector.
+func matchesSelector(selector *metav1.LabelSelector, labels map[string]string) bool {
+	if selector == nil {
+		// Empty selector matches all
+		return true
+	}
+
+	// Match labels
+	for key, value := range selector.MatchLabels {
+		if labels[key] != value {
+			return false
+		}
+	}
+
+	// TODO: Handle MatchExpressions for more complex selectors
+	return true
 }
