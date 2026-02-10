@@ -19,6 +19,25 @@ import (
 	internaltypes "github.com/nightjarctl/nightjar/internal/types"
 )
 
+const nsWorkloadCacheTTL = 30 * time.Second
+
+// namespaceWorkloadKinds are the workload kinds we resolve from namespace-level updates.
+// Skip Pods (too churny), ReplicaSets (owned by Deployments), Jobs/CronJobs (short-lived).
+var namespaceWorkloadKinds = []struct {
+	Kind string
+	GVR  schema.GroupVersionResource
+}{
+	{"Deployment", schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}},
+	{"StatefulSet", schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}},
+	{"DaemonSet", schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}},
+}
+
+// nsWorkloadCache caches workload lists per namespace to avoid API hammering during bursts.
+type nsWorkloadCache struct {
+	workloads []workloadKey
+	fetchedAt time.Time
+}
+
 // WorkloadAnnotatorOptions configures the WorkloadAnnotator behavior.
 type WorkloadAnnotatorOptions struct {
 	// DebounceDuration is the minimum time between PATCHes for the same workload.
@@ -62,7 +81,7 @@ type WorkloadAnnotator struct {
 	mu        sync.Mutex
 	lastPatch map[workloadKey]time.Time
 	pending   chan pendingUpdate
-	workloads map[workloadKey]bool // tracks known workloads needing updates
+	nsCache   map[string]nsWorkloadCache
 }
 
 // NewWorkloadAnnotator creates a new WorkloadAnnotator.
@@ -86,7 +105,7 @@ func NewWorkloadAnnotator(
 		opts:      opts,
 		lastPatch: make(map[workloadKey]time.Time),
 		pending:   make(chan pendingUpdate, 1000),
-		workloads: make(map[workloadKey]bool),
+		nsCache:   make(map[string]nsWorkloadCache),
 	}
 }
 
@@ -118,40 +137,70 @@ func (wa *WorkloadAnnotator) Start(ctx context.Context) error {
 // OnIndexChange is the callback for indexer.OnChangeFunc.
 // It should be registered with the indexer at construction time.
 func (wa *WorkloadAnnotator) OnIndexChange(event indexer.IndexEvent) {
-	// Find affected workloads based on constraint's affected namespaces
 	c := event.Constraint
 
-	// Queue updates for all affected namespaces
+	seen := make(map[string]struct{}, len(c.AffectedNamespaces)+1)
 	for _, ns := range c.AffectedNamespaces {
-		wa.queueNamespaceUpdate(ns)
+		if _, ok := seen[ns]; !ok {
+			seen[ns] = struct{}{}
+			wa.queueNamespaceUpdate(ns)
+		}
 	}
 
-	// Also handle the constraint's own namespace
 	if c.Namespace != "" {
-		wa.queueNamespaceUpdate(c.Namespace)
+		if _, ok := seen[c.Namespace]; !ok {
+			wa.queueNamespaceUpdate(c.Namespace)
+		}
 	}
 }
 
-// queueNamespaceUpdate queues annotation updates for workloads in a namespace.
+// queueNamespaceUpdate queues a namespace-level update. The worker resolves this
+// into individual workload updates via listNamespaceWorkloads.
 func (wa *WorkloadAnnotator) queueNamespaceUpdate(namespace string) {
-	// For now, we queue a placeholder workload key. In a real implementation,
-	// we would list workloads in the namespace and queue each one.
-	// The actual workload lookup happens in the worker.
-	key := workloadKey{
-		Namespace: namespace,
-		Kind:      "", // Will be resolved later
-		Name:      "", // Will be resolved later
-	}
-
-	wa.mu.Lock()
-	wa.workloads[key] = true
-	wa.mu.Unlock()
+	key := workloadKey{Namespace: namespace}
 
 	select {
 	case wa.pending <- pendingUpdate{key: key, scheduled: time.Now()}:
 	default:
 		wa.logger.Warn("Pending queue full, dropping update", zap.String("namespace", namespace))
 	}
+}
+
+// listNamespaceWorkloads returns workload keys for Deployments, StatefulSets, and
+// DaemonSets in the given namespace. Results are cached for nsWorkloadCacheTTL.
+func (wa *WorkloadAnnotator) listNamespaceWorkloads(ctx context.Context, namespace string) ([]workloadKey, error) {
+	wa.mu.Lock()
+	cached, ok := wa.nsCache[namespace]
+	wa.mu.Unlock()
+
+	if ok && time.Since(cached.fetchedAt) < nsWorkloadCacheTTL {
+		return cached.workloads, nil
+	}
+
+	var result []workloadKey
+	for _, wk := range namespaceWorkloadKinds {
+		list, err := wa.client.Resource(wk.GVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			wa.logger.Warn("Failed to list workloads in namespace",
+				zap.String("namespace", namespace),
+				zap.String("kind", wk.Kind),
+				zap.Error(err))
+			continue
+		}
+		for _, item := range list.Items {
+			result = append(result, workloadKey{
+				Namespace: namespace,
+				Kind:      wk.Kind,
+				Name:      item.GetName(),
+			})
+		}
+	}
+
+	wa.mu.Lock()
+	wa.nsCache[namespace] = nsWorkloadCache{workloads: result, fetchedAt: time.Now()}
+	wa.mu.Unlock()
+
+	return result, nil
 }
 
 // QueueWorkloadUpdate queues an annotation update for a specific workload.
@@ -200,10 +249,18 @@ func (wa *WorkloadAnnotator) worker(ctx context.Context, workerID int) {
 func (wa *WorkloadAnnotator) processUpdate(ctx context.Context, update pendingUpdate) {
 	key := update.key
 
-	// Skip if this is a namespace-level update (we'd need workload discovery)
+	// Namespace-level update: resolve to individual workload updates
 	if key.Kind == "" || key.Name == "" {
-		// For namespace-level updates, we skip for now.
-		// A full implementation would list workloads in the namespace.
+		workloads, err := wa.listNamespaceWorkloads(ctx, key.Namespace)
+		if err != nil {
+			wa.logger.Error("Failed to list namespace workloads",
+				zap.String("namespace", key.Namespace),
+				zap.Error(err))
+			return
+		}
+		for _, wk := range workloads {
+			wa.QueueWorkloadUpdate(wk.Namespace, wk.Kind, wk.Name)
+		}
 		return
 	}
 

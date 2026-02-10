@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -115,12 +116,16 @@ func main() {
 		logger.Fatal("Failed to create clientset", zap.Error(err))
 	}
 
-	// Build constraint indexer
+	// Build constraint indexer with annotator callback
+	var annotatorRef atomic.Pointer[notifier.WorkloadAnnotator]
 	idx := indexer.New(func(event indexer.IndexEvent) {
 		logger.Debug("Index event",
 			zap.String("type", event.Type),
 			zap.String("constraint", event.Constraint.Name),
 		)
+		if a := annotatorRef.Load(); a != nil {
+			a.OnIndexChange(event)
+		}
 	})
 
 	// Build discovery engine
@@ -140,6 +145,11 @@ func main() {
 	dispatcherOpts := notifier.DefaultDispatcherOptions()
 	dispatcher := notifier.NewDispatcher(clientset, logger, dispatcherOpts)
 
+	// Build workload annotator
+	annotatorOpts := notifier.DefaultWorkloadAnnotatorOptions()
+	annotator := notifier.NewWorkloadAnnotator(dynamicClient, idx, logger, annotatorOpts)
+	annotatorRef.Store(annotator)
+
 	// Setup signal handler context
 	ctx := ctrl.SetupSignalHandler()
 
@@ -155,6 +165,13 @@ func main() {
 		return corr.Start(ctx)
 	}}); err != nil {
 		logger.Fatal("Failed to add correlator to manager", zap.Error(err))
+	}
+
+	// Add runnable to start workload annotator
+	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
+		return annotator.Start(ctx)
+	}}); err != nil {
+		logger.Fatal("Failed to add workload annotator to manager", zap.Error(err))
 	}
 
 	// Add runnable to start dispatcher loop
