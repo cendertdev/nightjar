@@ -6,7 +6,6 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/cendertdev/nightjar)](https://goreportcard.com/report/github.com/cendertdev/nightjar)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cendertdev/nightjar)](https://github.com/cendertdev/nightjar/blob/master/go.mod)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GoDoc](https://pkg.go.dev/badge/github.com/nightjarctl/nightjar)](https://pkg.go.dev/github.com/nightjarctl/nightjar)
 
 **Automatic constraint discovery and developer notification for Kubernetes.**
 
