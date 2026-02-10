@@ -673,4 +673,3 @@ func genericSummary(ct types.ConstraintType) string {
 		return "A policy constraint applies"
 	}
 }
-
