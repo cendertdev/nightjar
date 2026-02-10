@@ -315,6 +315,82 @@ func TestCleanupStaleEntries(t *testing.T) {
 	}
 }
 
+func TestStartCleanup_StopsOnCancel(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	idx := indexer.New(nil)
+	eval := NewEvaluator(idx, &mockEvalContext{}, logger)
+	eval.SetDebounceDuration(10 * time.Millisecond)
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	eval.SetClock(func() time.Time { return now })
+
+	// Seed a stale entry.
+	eval.debounce.mu.Lock()
+	eval.debounce.firstSeen["stale-key"] = now.Add(-1 * time.Hour)
+	eval.debounce.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		eval.StartCleanup(ctx)
+		close(done)
+	}()
+
+	// Wait for at least one cleanup tick.
+	time.Sleep(50 * time.Millisecond)
+
+	// Stale entry should have been cleaned.
+	eval.debounce.mu.RLock()
+	_, hasStale := eval.debounce.firstSeen["stale-key"]
+	eval.debounce.mu.RUnlock()
+	if hasStale {
+		t.Fatal("expected stale entry to be cleaned by StartCleanup")
+	}
+
+	// Cancel context and verify goroutine exits.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("StartCleanup did not return after context cancel")
+	}
+}
+
+func TestEvaluate_WorkloadWithoutUID(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	idx := indexer.New(nil)
+	eval := NewEvaluator(idx, &mockEvalContext{}, logger)
+	eval.SetDebounceDuration(0)
+
+	r := &mockRule{
+		name: "test-rule",
+		constraints: []types.Constraint{
+			{UID: "c1", Name: "constraint-1", ConstraintType: types.ConstraintTypeMissing},
+		},
+	}
+	eval.RegisterRule(r)
+
+	// Create workload without a UID — should fall back to namespace/name.
+	workload := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "my-app",
+				"namespace": "default",
+			},
+		},
+	}
+
+	constraints, err := eval.Evaluate(context.Background(), workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 {
+		t.Fatalf("expected 1 constraint, got %d", len(constraints))
+	}
+}
+
 func TestEvaluate_ConcurrentSafety(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	idx := indexer.New(nil)

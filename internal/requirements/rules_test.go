@@ -2,6 +2,7 @@ package requirements
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -13,8 +14,11 @@ import (
 
 // testEvalContext is a configurable mock RequirementEvalContext for rule tests.
 type testEvalContext struct {
-	namespaces map[string]*unstructured.Unstructured
-	resources  map[string][]*unstructured.Unstructured // key: "gvr:namespace"
+	namespaces      map[string]*unstructured.Unstructured
+	resources       map[string][]*unstructured.Unstructured // key: "gvr:namespace"
+	getNamespaceErr error
+	listByGVRErr    error
+	findMatchingErr error
 }
 
 func newTestEvalContext() *testEvalContext {
@@ -51,6 +55,9 @@ func gvrKey(gvr schema.GroupVersionResource, namespace string) string {
 }
 
 func (t *testEvalContext) GetNamespace(_ context.Context, name string) (*unstructured.Unstructured, error) {
+	if t.getNamespaceErr != nil {
+		return nil, t.getNamespaceErr
+	}
 	ns, ok := t.namespaces[name]
 	if !ok {
 		return nil, fmt.Errorf("namespace %q not found", name)
@@ -59,11 +66,17 @@ func (t *testEvalContext) GetNamespace(_ context.Context, name string) (*unstruc
 }
 
 func (t *testEvalContext) ListByGVR(_ context.Context, gvr schema.GroupVersionResource, namespace string) ([]*unstructured.Unstructured, error) {
+	if t.listByGVRErr != nil {
+		return nil, t.listByGVRErr
+	}
 	key := gvrKey(gvr, namespace)
 	return t.resources[key], nil
 }
 
 func (t *testEvalContext) FindMatchingResources(_ context.Context, gvr schema.GroupVersionResource, namespace string, labels map[string]string) ([]*unstructured.Unstructured, error) {
+	if t.findMatchingErr != nil {
+		return nil, t.findMatchingErr
+	}
 	key := gvrKey(gvr, namespace)
 	all := t.resources[key]
 
@@ -867,5 +880,381 @@ func TestHasMeshWidePA(t *testing.T) {
 				t.Errorf("hasMeshWidePA() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// ---- Name/Description Tests ----
+
+func TestRuleNameAndDescription(t *testing.T) {
+	rules := []struct {
+		rule        types.RequirementRule
+		wantName    string
+		wantDescNon string // just check non-empty
+	}{
+		{NewIstioRoutingRule(), "istio-routing", "Checks that workloads"},
+		{NewPrometheusMonitorRule(), "prometheus-monitor", "Checks that workloads"},
+		{NewIstioMTLSRule(), "istio-mtls", "Checks that namespaces"},
+		{NewCertIssuerRule(), "cert-issuer", "Checks that cert-manager"},
+	}
+	for _, tt := range rules {
+		t.Run(tt.wantName, func(t *testing.T) {
+			if tt.rule.Name() != tt.wantName {
+				t.Errorf("Name() = %q, want %q", tt.rule.Name(), tt.wantName)
+			}
+			if tt.rule.Description() == "" {
+				t.Error("Description() should not be empty")
+			}
+		})
+	}
+}
+
+// ---- Istio Routing: TCP/TLS Route Tests ----
+
+func TestIstioRoutingRule_TCPRouteMatch(t *testing.T) {
+	rule := NewIstioRoutingRule()
+	evalCtx := newTestEvalContext()
+
+	vs := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1",
+			"kind":       "VirtualService",
+			"metadata":   map[string]interface{}{"name": "my-vs", "namespace": "default"},
+			"spec": map[string]interface{}{
+				"tcp": []interface{}{
+					map[string]interface{}{
+						"route": []interface{}{
+							map[string]interface{}{
+								"destination": map[string]interface{}{
+									"host": "my-app",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	evalCtx.addResource(virtualServiceGVR, "default", vs)
+
+	workload := makeDeployment("my-app", "default",
+		map[string]string{"sidecar.istio.io/status": "injected"},
+		nil, nil)
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected no constraints when TCP route matches workload")
+	}
+}
+
+func TestIstioRoutingRule_TLSRouteMatch(t *testing.T) {
+	rule := NewIstioRoutingRule()
+	evalCtx := newTestEvalContext()
+
+	vs := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.istio.io/v1",
+			"kind":       "VirtualService",
+			"metadata":   map[string]interface{}{"name": "my-vs", "namespace": "default"},
+			"spec": map[string]interface{}{
+				"tls": []interface{}{
+					map[string]interface{}{
+						"route": []interface{}{
+							map[string]interface{}{
+								"destination": map[string]interface{}{
+									"host": "my-app.default",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	evalCtx.addResource(virtualServiceGVR, "default", vs)
+
+	workload := makeDeployment("my-app", "default",
+		map[string]string{"sidecar.istio.io/status": "injected"},
+		nil, nil)
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected no constraints when TLS route matches workload")
+	}
+}
+
+// ---- Cluster-Scoped / Empty Namespace Tests ----
+
+func TestIstioRoutingRule_ClusterScopedWorkload(t *testing.T) {
+	rule := NewIstioRoutingRule()
+	evalCtx := newTestEvalContext()
+
+	workload := makeDeployment("my-app", "",
+		map[string]string{"sidecar.istio.io/status": "injected"},
+		nil, nil)
+	workload.Object["metadata"].(map[string]interface{})["namespace"] = ""
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected nil for cluster-scoped workload")
+	}
+}
+
+func TestPrometheusMonitorRule_ClusterScopedWorkload(t *testing.T) {
+	rule := NewPrometheusMonitorRule()
+	evalCtx := newTestEvalContext()
+
+	containers := []interface{}{
+		map[string]interface{}{
+			"name":  "app",
+			"ports": []interface{}{map[string]interface{}{"name": "metrics"}},
+		},
+	}
+	workload := makeDeployment("my-app", "", nil,
+		map[string]string{"app": "my-app"}, containers)
+	workload.Object["metadata"].(map[string]interface{})["namespace"] = ""
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected nil for cluster-scoped workload with metrics port")
+	}
+}
+
+func TestIstioMTLSRule_ClusterScopedWorkload(t *testing.T) {
+	rule := NewIstioMTLSRule()
+	evalCtx := newTestEvalContext()
+
+	workload := makeDeployment("my-app", "", nil, nil, nil)
+	workload.Object["metadata"].(map[string]interface{})["namespace"] = ""
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected nil for cluster-scoped workload")
+	}
+}
+
+func TestCertIssuerRule_NamespacedIssuerEmptyNamespace(t *testing.T) {
+	rule := NewCertIssuerRule()
+	evalCtx := newTestEvalContext()
+
+	workload := makeDeployment("my-app", "",
+		map[string]string{"cert-manager.io/issuer-name": "my-issuer"},
+		nil, nil)
+	workload.Object["metadata"].(map[string]interface{})["namespace"] = ""
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected nil when namespace is empty for namespaced issuer")
+	}
+}
+
+func TestCertIssuerRule_ClusterIssuerMissing_EmptyNamespace(t *testing.T) {
+	rule := NewCertIssuerRule()
+	evalCtx := newTestEvalContext()
+
+	workload := makeDeployment("my-app", "",
+		map[string]string{"cert-manager.io/cluster-issuer": "letsencrypt-prod"},
+		nil, nil)
+	workload.Object["metadata"].(map[string]interface{})["namespace"] = ""
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 {
+		t.Fatalf("expected 1 constraint, got %d", len(constraints))
+	}
+	// Verify the UID uses "cluster" prefix for empty namespace.
+	if constraints[0].Namespace != "" {
+		t.Fatalf("expected empty namespace, got %q", constraints[0].Namespace)
+	}
+}
+
+// ---- Prometheus: Top-Level Labels Fallback ----
+
+func TestPrometheusMonitorRule_TopLevelLabelsFallback(t *testing.T) {
+	rule := NewPrometheusMonitorRule()
+	evalCtx := newTestEvalContext()
+
+	// Workload without pod template labels but with top-level labels.
+	workload := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name":      "my-pod",
+				"namespace": "default",
+				"uid":       "uid-pod",
+				"labels": map[string]interface{}{
+					"app": "my-app",
+				},
+			},
+			"spec": map[string]interface{}{
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name":  "app",
+						"ports": []interface{}{map[string]interface{}{"name": "metrics"}},
+					},
+				},
+			},
+		},
+	}
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 {
+		t.Fatalf("expected 1 constraint (no monitor for pod with top-level labels), got %d", len(constraints))
+	}
+}
+
+func TestPrometheusMonitorRule_NoLabelsAnywhere(t *testing.T) {
+	rule := NewPrometheusMonitorRule()
+	evalCtx := newTestEvalContext()
+
+	// Pod with metrics port but no labels at all.
+	workload := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name":      "my-pod",
+				"namespace": "default",
+				"uid":       "uid-pod",
+			},
+			"spec": map[string]interface{}{
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name":  "app",
+						"ports": []interface{}{map[string]interface{}{"name": "metrics"}},
+					},
+				},
+			},
+		},
+	}
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 0 {
+		t.Fatal("expected nil when no labels on workload")
+	}
+}
+
+// ---- Istio mTLS: Workload in istio-system Namespace ----
+
+func TestIstioMTLSRule_WorkloadInIstioSystem(t *testing.T) {
+	rule := NewIstioMTLSRule()
+	evalCtx := newTestEvalContext()
+	evalCtx.addNamespace("istio-system", map[string]string{"istio-injection": "enabled"})
+
+	workload := makeDeployment("istiod", "istio-system", nil, nil, nil)
+
+	constraints, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No PA in the namespace, and it skips the mesh-wide check since we ARE in istio-system.
+	if len(constraints) != 1 {
+		t.Fatalf("expected 1 constraint, got %d", len(constraints))
+	}
+}
+
+// ---- Error Path Tests ----
+
+func TestIstioRoutingRule_ListByGVRError(t *testing.T) {
+	rule := NewIstioRoutingRule()
+	evalCtx := newTestEvalContext()
+	evalCtx.listByGVRErr = errors.New("list failed")
+
+	workload := makeDeployment("my-app", "default",
+		map[string]string{"sidecar.istio.io/status": "injected"},
+		nil, nil)
+
+	_, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err == nil {
+		t.Fatal("expected error from ListByGVR")
+	}
+}
+
+func TestIstioMTLSRule_GetNamespaceError(t *testing.T) {
+	rule := NewIstioMTLSRule()
+	evalCtx := newTestEvalContext()
+	evalCtx.getNamespaceErr = errors.New("get ns failed")
+
+	workload := makeDeployment("my-app", "default", nil, nil, nil)
+
+	_, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err == nil {
+		t.Fatal("expected error from GetNamespace")
+	}
+}
+
+func TestPrometheusMonitorRule_FindMatchingResourcesError(t *testing.T) {
+	rule := NewPrometheusMonitorRule()
+	evalCtx := newTestEvalContext()
+	evalCtx.findMatchingErr = errors.New("find failed")
+
+	containers := []interface{}{
+		map[string]interface{}{
+			"name":  "app",
+			"ports": []interface{}{map[string]interface{}{"name": "metrics"}},
+		},
+	}
+	workload := makeDeployment("my-app", "default", nil,
+		map[string]string{"app": "my-app"}, containers)
+
+	_, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err == nil {
+		t.Fatal("expected error from FindMatchingResources")
+	}
+}
+
+func TestCertIssuerRule_ClusterIssuerListError(t *testing.T) {
+	rule := NewCertIssuerRule()
+	evalCtx := newTestEvalContext()
+	evalCtx.listByGVRErr = errors.New("list failed")
+
+	workload := makeDeployment("my-app", "default",
+		map[string]string{"cert-manager.io/cluster-issuer": "letsencrypt-prod"},
+		nil, nil)
+
+	_, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err == nil {
+		t.Fatal("expected error from issuerExists")
+	}
+}
+
+func TestCertIssuerRule_NamespacedIssuerListError(t *testing.T) {
+	rule := NewCertIssuerRule()
+	evalCtx := newTestEvalContext()
+	evalCtx.listByGVRErr = errors.New("list failed")
+
+	workload := makeDeployment("my-app", "default",
+		map[string]string{"cert-manager.io/issuer-name": "my-issuer"},
+		nil, nil)
+
+	_, err := rule.Evaluate(context.Background(), workload, evalCtx)
+	if err == nil {
+		t.Fatal("expected error from issuerExists for namespaced issuer")
 	}
 }
