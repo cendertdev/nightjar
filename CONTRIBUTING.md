@@ -2,6 +2,21 @@
 
 Thank you for your interest in contributing! This project is in early development and contributions are welcome.
 
+## Communication
+
+- **Questions & Discussion**: Open a [GitHub Discussion](https://github.com/nightjarctl/nightjar/discussions) or Issue
+- **Bug Reports**: Use [GitHub Issues](https://github.com/nightjarctl/nightjar/issues) with reproduction steps
+- **Security Issues**: See [SECURITY.md](SECURITY.md) — do not use public issues
+
+## First-Time Contributors
+
+New to the project? Look for issues labeled [`good first issue`](https://github.com/nightjarctl/nightjar/labels/good%20first%20issue) or [`help wanted`](https://github.com/nightjarctl/nightjar/labels/help%20wanted).
+
+Good starting points:
+- Adding test fixtures for edge cases
+- Documentation improvements
+- Writing a new adapter (see [docs/ADAPTER_GUIDE.md](docs/ADAPTER_GUIDE.md))
+
 ## Development Setup
 
 ### Prerequisites
@@ -106,17 +121,53 @@ The short version:
 - Write clear `Summary` strings — they appear in developer notifications
 - Every adapter needs comprehensive test fixtures
 
+## Commit Messages
+
+Use clear, imperative mood messages:
+
+```
+Add Istio adapter for AuthorizationPolicy    # Good
+Added Istio adapter                          # Bad (past tense)
+Istio stuff                                  # Bad (unclear)
+```
+
+For larger changes, use a body to explain **why**:
+
+```
+Add timeout to discovery rescan loop
+
+Without a timeout, a slow API server could block the entire
+rescan cycle indefinitely. Default 30s matches controller-runtime.
+```
+
 ## Pull Request Process
 
-1. Fork the repo and create a branch from `main`
+1. Fork the repo and create a branch from `master`
 2. Add tests for any new functionality
 3. Run `make test` and `make lint` — both must pass
 4. Update documentation if you're changing behavior
 5. Write a clear PR description explaining what and why
 6. One approval required for merge
 
+## Developer Certificate of Origin
+
+All contributions must include a sign-off indicating you have the right to submit the code under the Apache 2.0 license:
+
+```bash
+git commit -s -m "Add new feature"
+```
+
+This adds a `Signed-off-by` line to your commit. By signing off, you certify:
+
+1. You wrote the code, or have the right to submit it
+2. You have the right to submit it under Apache 2.0
+3. You understand this contribution is public and maintained indefinitely
+
+See [developercertificate.org](https://developercertificate.org/) for the full DCO text.
+
 ## Reporting Issues
 
 - Use GitHub Issues
 - Include: Kubernetes version, installed policy engines, steps to reproduce
 - For constraint discovery issues: include the CRD YAML and expected behavior
+- **Security vulnerabilities**: Report privately via [SECURITY.md](SECURITY.md)
