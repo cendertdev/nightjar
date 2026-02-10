@@ -16,6 +16,7 @@ import (
 	"github.com/nightjarctl/nightjar/internal/hubble"
 	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/types"
+	"github.com/nightjarctl/nightjar/internal/util"
 )
 
 const (
@@ -388,19 +389,6 @@ func (c *Correlator) correlateFlowDropInNamespace(ctx context.Context, drop hubb
 }
 
 // matchesSelector checks if the given labels match the selector.
-func matchesSelector(selector *metav1.LabelSelector, labels map[string]string) bool {
-	if selector == nil {
-		// Empty selector matches all
-		return true
-	}
-
-	// Match labels
-	for key, value := range selector.MatchLabels {
-		if labels[key] != value {
-			return false
-		}
-	}
-
-	// TODO: Handle MatchExpressions for more complex selectors
-	return true
+func matchesSelector(selector *metav1.LabelSelector, lbls map[string]string) bool {
+	return util.MatchesLabelSelector(selector, lbls)
 }

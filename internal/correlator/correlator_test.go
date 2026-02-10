@@ -76,6 +76,8 @@ func TestIsDuplicate(t *testing.T) {
 }
 
 func TestMatchesSelector(t *testing.T) {
+	// Comprehensive selector matching tests are in internal/util/labels_test.go.
+	// These cases verify the correlator's delegation works correctly.
 	tests := []struct {
 		name     string
 		selector *metav1.LabelSelector
@@ -85,12 +87,6 @@ func TestMatchesSelector(t *testing.T) {
 		{
 			name:     "nil selector matches all",
 			selector: nil,
-			labels:   map[string]string{"app": "foo"},
-			expected: true,
-		},
-		{
-			name:     "empty selector matches all",
-			selector: &metav1.LabelSelector{},
 			labels:   map[string]string{"app": "foo"},
 			expected: true,
 		},
@@ -111,12 +107,14 @@ func TestMatchesSelector(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "missing label",
+			name: "MatchExpressions In operator",
 			selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": "foo"},
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "env", Operator: metav1.LabelSelectorOpIn, Values: []string{"prod", "staging"}},
+				},
 			},
-			labels:   map[string]string{"version": "v1"},
-			expected: false,
+			labels:   map[string]string{"env": "prod"},
+			expected: true,
 		},
 	}
 
