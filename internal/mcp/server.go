@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/nightjarctl/nightjar/internal/indexer"
+	"github.com/nightjarctl/nightjar/internal/requirements"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -35,6 +36,9 @@ type ServerOptions struct {
 
 	// DefaultContact for remediation steps.
 	DefaultContact string
+
+	// Evaluator for missing-resource detection in pre-check. May be nil.
+	Evaluator *requirements.Evaluator
 }
 
 // DefaultServerOptions returns sensible defaults.
@@ -83,7 +87,7 @@ func NewServer(idx *indexer.Indexer, opts ServerOptions) *Server {
 		sseClients: make(map[string]chan []byte),
 	}
 
-	s.handlers = NewHandlers(idx, opts.PrivacyResolver, opts.DefaultContact, opts.Logger)
+	s.handlers = NewHandlers(idx, opts.PrivacyResolver, opts.DefaultContact, opts.Logger, opts.Evaluator)
 
 	return s
 }
