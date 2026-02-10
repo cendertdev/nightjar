@@ -3,8 +3,20 @@ name: Security Scanning & SBOM
 on:
   push:
     branches: [master, main]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.github/workflows/security.yml'
   pull_request:
     branches: [master, main]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.github/workflows/security.yml'
   schedule:
     # Run weekly on Monday at 9am UTC
     - cron: '0 9 * * 1'

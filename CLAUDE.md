@@ -13,11 +13,19 @@ Kubernetes operator. Discovers ALL constraints/policies/quotas in a cluster acro
 ```
 make build      # Must exit 0
 make test       # Must exit 0
-make lint       # Must exit 0
+make lint       # Must exit 0 (runs golangci-lint v2 with .golangci.yml)
 make manifests  # Generates CRD YAML into config/crd/
 make generate   # Generates DeepCopy into api/v1alpha1/zz_generated.deepcopy.go
 make run        # Run locally against current kubeconfig (no leader election)
 ```
+
+## Pre-Commit Checks (run before every commit)
+```
+gofmt -l .              # Must produce no output
+golangci-lint run ./... # Must produce 0 issues
+go test -race ./...     # Must exit 0
+```
+CI rejects commits that fail any of these. Fix lint issues before committing, not after.
 
 ## Rules (violating any of these is always wrong)
 - Parse external CRDs from `unstructured.Unstructured` only. Never import typed policy engine clients.
@@ -45,7 +53,7 @@ internal/requirements/ Missing-resource detection (ServiceMonitor, VirtualServic
 internal/hubble/       Optional Hubble gRPC client for flow drop detection
 cmd/controller/        Main entrypoint, wires everything
 cmd/webhook/           Admission webhook binary (separate deployment)
-cmd/kubectl-sentinel/  kubectl plugin — structured JSON output matching MCP schemas
+cmd/nightjarctl/nightjar-sentinel/  kubectl plugin — structured JSON output matching MCP schemas
 ```
 
 ## Adapter Pattern (copy this exactly for every new adapter)
