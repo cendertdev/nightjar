@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,12 +28,21 @@ import (
 // mockDiscoveryClient embeds FakeDiscovery and overrides ServerPreferredResources.
 type mockDiscoveryClient struct {
 	*fakediscovery.FakeDiscovery
+	mu        sync.Mutex
 	resources []*metav1.APIResourceList
 	scanErr   error
 }
 
 func (m *mockDiscoveryClient) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.resources, m.scanErr
+}
+
+func (m *mockDiscoveryClient) setScanErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scanErr = err
 }
 
 func newMockDiscovery(resources []*metav1.APIResourceList) *mockDiscoveryClient {
@@ -751,7 +761,7 @@ func TestStart_PeriodicRescan_Error(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set error for rescan
-	mockDisc.scanErr = assert.AnError
+	mockDisc.setScanErr(assert.AnError)
 
 	// Wait for periodic rescan to fire (should log error but not crash)
 	time.Sleep(150 * time.Millisecond)

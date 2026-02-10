@@ -384,9 +384,9 @@ func TestRemediationBuilder_ConvertSteps_EmptySummary(t *testing.T) {
 	rb := NewRemediationBuilder("test@example.com")
 
 	c := types.Constraint{
-		UID:            k8stypes.UID("convert-uid"),
-		Name:           "test-policy",
-		ConstraintType: types.ConstraintTypeNetworkEgress,
+		UID:             k8stypes.UID("convert-uid"),
+		Name:            "test-policy",
+		ConstraintType:  types.ConstraintTypeNetworkEgress,
 		RemediationHint: "", // empty hint - should fall back to generateSummary
 		Remediation: []types.RemediationStep{
 			{
@@ -423,14 +423,14 @@ func TestRemediationBuilder_ConvertSteps_AllFields(t *testing.T) {
 				Template:    "template-data",
 			},
 			{
-				Type:    "link",
+				Type:        "link",
 				Description: "See docs",
-				URL:     "https://example.com",
+				URL:         "https://example.com",
 			},
 			{
-				Type:    "manual",
+				Type:        "manual",
 				Description: "Contact someone",
-				Contact: "admin@example.com",
+				Contact:     "admin@example.com",
 			},
 		},
 	}

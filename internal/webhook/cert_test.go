@@ -824,8 +824,8 @@ func TestEnsureCertManagerCerts_MissingCertData(t *testing.T) {
 	logger := zap.NewNop()
 
 	config := CertManagerConfig{
-		Mode:      CertModeCertManager,
-		Namespace: "test-ns",
+		Mode:       CertModeCertManager,
+		Namespace:  "test-ns",
 		SecretName: "test-tls",
 	}
 
@@ -968,8 +968,6 @@ func TestStartRotationWatcher_SelfSigned_NeedsRotation(t *testing.T) {
 	err := cm.EnsureCertificates(ctx)
 	require.NoError(t, err)
 
-	initialCert := cm.serverCert
-
 	// Replace the secret with an expiring cert to trigger rotation
 	caCertPEM, caKeyPEM, _ := cm.generateCA()
 	caBlock, _ := pem.Decode(caCertPEM)
@@ -1008,9 +1006,10 @@ func TestStartRotationWatcher_SelfSigned_NeedsRotation(t *testing.T) {
 	cancel()
 	time.Sleep(50 * time.Millisecond)
 
-	// After rotation, cm.serverCert should be updated (different from initial)
-	// The watcher calls EnsureCertificates -> ensureSelfSignedCerts which updates cm.serverCert
-	assert.NotEqual(t, initialCert, cm.serverCert, "Server cert should have been rotated")
+	// Verify rotation by reading the secret (avoids racing on struct fields)
+	rotatedSecret, err := client.CoreV1().Secrets(config.Namespace).Get(context.Background(), config.SecretName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotEqual(t, expiringPEM, rotatedSecret.Data["tls.crt"], "Server cert should have been rotated")
 }
 
 func TestGenerateServerCert_InvalidCACertPEM(t *testing.T) {

@@ -18,7 +18,7 @@ type fakeAdapter struct {
 	gvrs []schema.GroupVersionResource
 }
 
-func (a *fakeAdapter) Name() string                         { return a.name }
+func (a *fakeAdapter) Name() string                           { return a.name }
 func (a *fakeAdapter) Handles() []schema.GroupVersionResource { return a.gvrs }
 func (a *fakeAdapter) Parse(_ context.Context, _ *unstructured.Unstructured) ([]types.Constraint, error) {
 	return nil, nil

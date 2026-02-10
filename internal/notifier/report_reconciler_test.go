@@ -427,10 +427,10 @@ func TestGvrToKindName_GenericFallback(t *testing.T) {
 		expected string
 	}{
 		{"ciliumclusterwidenetworkpolicies", "CiliumClusterwideNetworkPolicy"},
-		{"fooconfigs", "Fooconfig"},     // generic: strips s, capitalizes
-		{"x", "X"},                       // single char, no trailing s
-		{"", ""},                          // empty string
-		{"mesh", "Mesh"},                 // no trailing s, just capitalize
+		{"fooconfigs", "Fooconfig"}, // generic: strips s, capitalizes
+		{"x", "X"},                  // single char, no trailing s
+		{"", ""},                    // empty string
+		{"mesh", "Mesh"},            // no trailing s, just capitalize
 	}
 
 	for _, tt := range tests {

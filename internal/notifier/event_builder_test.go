@@ -529,7 +529,7 @@ func TestGvrToKind_EventBuilder(t *testing.T) {
 		resource string
 		expected string
 	}{
-		{"networkpolicies", "Networkpolicy"},   // event_builder uses different singularization
+		{"networkpolicies", "Networkpolicy"}, // event_builder uses different singularization
 		{"resourcequotas", "Resourcequota"},
 		{"pods", "Pod"},
 		{"deployments", "Deployment"},

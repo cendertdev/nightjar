@@ -1001,9 +1001,9 @@ func TestToConstraintResultWithRemediation(t *testing.T) {
 					Patch:       "some-patch",
 				},
 				{
-					Type:     "link",
+					Type:        "link",
 					Description: "See docs",
-					URL:      "https://example.com/docs",
+					URL:         "https://example.com/docs",
 				},
 				{
 					Type:        "yaml_patch",

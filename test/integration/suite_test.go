@@ -41,15 +41,15 @@ func init() {
 // IntegrationSuite is the base test suite for integration tests.
 type IntegrationSuite struct {
 	suite.Suite
-	testEnv    *envtest.Environment
-	cfg        *rest.Config
-	k8sClient  client.Client
-	ctx        context.Context
-	cancel     context.CancelFunc
-	logger     *zap.Logger
-	registry   *adapters.Registry
-	idx        *indexer.Indexer
-	engine     *discoveryengine.Engine
+	testEnv   *envtest.Environment
+	cfg       *rest.Config
+	k8sClient client.Client
+	ctx       context.Context
+	cancel    context.CancelFunc
+	logger    *zap.Logger
+	registry  *adapters.Registry
+	idx       *indexer.Indexer
+	engine    *discoveryengine.Engine
 }
 
 // SetupSuite runs once before all tests.

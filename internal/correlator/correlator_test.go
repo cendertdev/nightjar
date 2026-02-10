@@ -751,10 +751,10 @@ func TestCorrelateFlowDrop_MultipleConstraints(t *testing.T) {
 	}
 	// Constraint 4: network ingress, nil selector (matches all)
 	c4 := internaltypes.Constraint{
-		UID:            types.UID("c-ingress-all"),
-		Name:           "ingress-all",
-		Namespace:      "production",
-		ConstraintType: internaltypes.ConstraintTypeNetworkIngress,
+		UID:              types.UID("c-ingress-all"),
+		Name:             "ingress-all",
+		Namespace:        "production",
+		ConstraintType:   internaltypes.ConstraintTypeNetworkIngress,
 		WorkloadSelector: nil, // Matches all
 	}
 

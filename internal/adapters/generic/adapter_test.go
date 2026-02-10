@@ -251,8 +251,8 @@ func TestParseWithGVR_AllConstraintTypes(t *testing.T) {
 	a := New()
 
 	tests := []struct {
-		typeAnnotation     string
-		expectedType       types.ConstraintType
+		typeAnnotation string
+		expectedType   types.ConstraintType
 	}{
 		{"NetworkIngress", types.ConstraintTypeNetworkIngress},
 		{"NetworkEgress", types.ConstraintTypeNetworkEgress},
