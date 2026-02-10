@@ -16,6 +16,23 @@ linters:
     - unused
     - ineffassign
     - misspell
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (net/http.ResponseWriter).Write
+        - (*go.uber.org/zap.Logger).Sync
+        - (*github.com/spf13/cobra.Command).MarkFlagRequired
+        - (*text/tabwriter.Writer).Flush
   exclusions:
     paths:
       - "zz_generated.*"
+    rules:
+      - linters:
+          - errcheck
+        path: _test\.go
+      - linters:
+          - errcheck
+        text: ".Close()"

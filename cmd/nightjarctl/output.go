@@ -288,5 +288,3 @@ func severityColor(severity string) string {
 		return ""
 	}
 }
-
-const colorReset = "\033[0m"

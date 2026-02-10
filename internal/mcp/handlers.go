@@ -3,7 +3,6 @@ package mcp
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -675,8 +674,3 @@ func genericSummary(ct types.ConstraintType) string {
 	}
 }
 
-// Compile regex patterns at init time
-var (
-	namespacePattern = regexp.MustCompile(`namespace[:\s]+["']?(\w+)["']?`)
-	portPattern      = regexp.MustCompile(`port[:\s]+(\d+)`)
-)

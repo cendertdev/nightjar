@@ -116,7 +116,7 @@ func extractLabelSelector(spec map[string]interface{}, field string) *metav1.Lab
 // buildIngressSummary creates a human-readable summary of ingress rules.
 func buildIngressSummary(name string, spec map[string]interface{}) string {
 	ingress := util.SafeNestedSlice(spec, "ingress")
-	if ingress == nil || len(ingress) == 0 {
+	if len(ingress) == 0 {
 		return fmt.Sprintf("NetworkPolicy %q denies all ingress traffic", name)
 	}
 	return fmt.Sprintf("NetworkPolicy %q restricts ingress to %d rule(s)", name, len(ingress))
@@ -125,7 +125,7 @@ func buildIngressSummary(name string, spec map[string]interface{}) string {
 // buildEgressSummary creates a human-readable summary of egress rules.
 func buildEgressSummary(name string, spec map[string]interface{}) string {
 	egress := util.SafeNestedSlice(spec, "egress")
-	if egress == nil || len(egress) == 0 {
+	if len(egress) == 0 {
 		return fmt.Sprintf("NetworkPolicy %q denies all egress traffic", name)
 	}
 	return fmt.Sprintf("NetworkPolicy %q restricts egress to %d rule(s)", name, len(egress))

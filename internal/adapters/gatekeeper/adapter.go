@@ -299,7 +299,7 @@ func buildRemediation(kind, name string) []types.RemediationStep {
 	return []types.RemediationStep{
 		{
 			Type:              "kubectl",
-			Description:       fmt.Sprintf("View the constraint details"),
+			Description:       "View the constraint details",
 			Command:           fmt.Sprintf("kubectl get %s %s -o yaml", strings.ToLower(kind), name),
 			RequiresPrivilege: "developer",
 		},

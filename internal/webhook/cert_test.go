@@ -1135,10 +1135,10 @@ func TestCreateWebhookConfiguration_Rules(t *testing.T) {
 	rule := webhook.Rules[0]
 	assert.Contains(t, rule.Operations, admissionregistrationv1.Create)
 	assert.Contains(t, rule.Operations, admissionregistrationv1.Update)
-	assert.Equal(t, []string{"*"}, rule.Rule.APIGroups)
-	assert.Equal(t, []string{"*"}, rule.Rule.APIVersions)
-	assert.Contains(t, rule.Rule.Resources, "pods")
-	assert.Contains(t, rule.Rule.Resources, "deployments")
+	assert.Equal(t, []string{"*"}, rule.APIGroups)
+	assert.Equal(t, []string{"*"}, rule.APIVersions)
+	assert.Contains(t, rule.Resources, "pods")
+	assert.Contains(t, rule.Resources, "deployments")
 
 	// SideEffects
 	assert.Equal(t, admissionregistrationv1.SideEffectClassNone, *webhook.SideEffects)

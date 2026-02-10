@@ -189,7 +189,7 @@ func (e *Engine) startInformer(ctx context.Context, gvr schema.GroupVersionResou
 	informer := e.informerFactory.ForResource(gvr).Informer()
 
 	// Register event handlers
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			e.handleAdd(ctx, gvr, obj)
 		},
@@ -199,7 +199,10 @@ func (e *Engine) startInformer(ctx context.Context, gvr schema.GroupVersionResou
 		DeleteFunc: func(obj interface{}) {
 			e.handleDelete(gvr, obj)
 		},
-	})
+	}); err != nil {
+		e.logger.Error("Failed to add event handler", zap.String("gvr", gvr.String()), zap.Error(err))
+		return
+	}
 
 	e.informers[gvr] = informer
 

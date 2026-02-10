@@ -196,7 +196,7 @@ func (c *Client) connectionLoop(ctx context.Context) {
 		}
 
 		if c.conn != nil {
-			c.conn.Close()
+			_ = c.conn.Close()
 			c.conn = nil
 		}
 

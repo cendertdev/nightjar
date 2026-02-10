@@ -46,7 +46,7 @@ func (a *Adapter) Parse(ctx context.Context, obj *unstructured.Unstructured) ([]
 
 	// Get hard limits from spec
 	hard := util.SafeNestedMap(spec, "hard")
-	if hard == nil || len(hard) == 0 {
+	if len(hard) == 0 {
 		return nil, nil // No limits defined
 	}
 

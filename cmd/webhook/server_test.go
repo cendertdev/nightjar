@@ -193,7 +193,8 @@ func TestGetTLSConfig_CertManagerCerts(t *testing.T) {
 
 	assert.Equal(t, uint16(tls.VersionTLS12), tlsCfg.MinVersion)
 	assert.NotNil(t, tlsCfg.GetCertificate, "CertManager path should set GetCertificate callback")
-	assert.True(t, tlsCfg.PreferServerCipherSuites)
+	// PreferServerCipherSuites is deprecated since Go 1.18 and ignored.
+	// TLS 1.3 cipher suites are not configurable; Go handles them.
 	assert.Contains(t, tlsCfg.CurvePreferences, tls.X25519)
 	assert.Contains(t, tlsCfg.CurvePreferences, tls.CurveP256)
 }

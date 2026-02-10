@@ -300,9 +300,10 @@ func TestParse_SpecsAsList(t *testing.T) {
 	// Find ingress and egress constraints
 	var ingressC, egressC types.Constraint
 	for _, c := range constraints {
-		if c.ConstraintType == types.ConstraintTypeNetworkIngress {
+		switch c.ConstraintType {
+		case types.ConstraintTypeNetworkIngress:
 			ingressC = c
-		} else if c.ConstraintType == types.ConstraintTypeNetworkEgress {
+		case types.ConstraintTypeNetworkEgress:
 			egressC = c
 		}
 	}
