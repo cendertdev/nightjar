@@ -16,7 +16,6 @@ linters:
     - unused
     - gosimple
     - ineffassign
-    - typecheck
     - misspell
   exclusions:
     paths:
