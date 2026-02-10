@@ -1,7 +1,14 @@
+version: "2"
+
 run:
   timeout: 5m
 
+formatters:
+  enable:
+    - gofmt
+
 linters:
+  default: none
   enable:
     - govet
     - errcheck
@@ -11,8 +18,6 @@ linters:
     - ineffassign
     - typecheck
     - misspell
-    - gofmt
-
-issues:
-  exclude-files:
-    - "zz_generated.*"
+  exclusions:
+    paths:
+      - "zz_generated.*"
