@@ -4,11 +4,11 @@ import (
 	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/nightjarctl/nightjar/internal/types"
+	"github.com/nightjarctl/nightjar/internal/util"
 )
 
 // IndexEvent represents a change to the constraint index.
@@ -115,20 +115,7 @@ func (idx *Indexer) ByLabels(ns string, workloadLabels map[string]string) []type
 
 // matchesLabels checks if a workload's labels match the constraint's selector.
 func (idx *Indexer) matchesLabels(selector *metav1.LabelSelector, workloadLabels map[string]string) bool {
-	// nil selector matches everything
-	if selector == nil {
-		return true
-	}
-	// Empty selector also matches everything
-	if len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
-		return true
-	}
-	// Convert to labels.Selector and match
-	sel, err := metav1.LabelSelectorAsSelector(selector)
-	if err != nil {
-		return false
-	}
-	return sel.Matches(labels.Set(workloadLabels))
+	return util.MatchesLabelSelector(selector, workloadLabels)
 }
 
 // ByType returns all constraints with the given ConstraintType.
