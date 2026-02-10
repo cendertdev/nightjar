@@ -391,7 +391,7 @@ func TestNewWorkloadAnnotator(t *testing.T) {
 	require.NotNil(t, wa)
 	assert.NotNil(t, wa.lastPatch)
 	assert.NotNil(t, wa.pending)
-	assert.NotNil(t, wa.workloads)
+	assert.NotNil(t, wa.nsCache)
 	assert.Equal(t, 30*time.Second, wa.opts.DebounceDuration)
 	assert.Equal(t, 5, wa.opts.Workers)
 }
@@ -428,14 +428,9 @@ func TestWorkloadAnnotator_OnIndexChange(t *testing.T) {
 
 	wa.OnIndexChange(event)
 
-	// Should have queued updates for ns-a and ns-b
-	wa.mu.Lock()
-	assert.True(t, wa.workloads[workloadKey{Namespace: "ns-a"}])
-	assert.True(t, wa.workloads[workloadKey{Namespace: "ns-b"}])
-	wa.mu.Unlock()
-
-	// Should have items in the pending channel
-	assert.True(t, len(wa.pending) >= 2)
+	// Should have items in the pending channel (ns-a appears in both
+	// AffectedNamespaces and Namespace, but dedup means only 2 updates)
+	assert.Equal(t, 2, len(wa.pending))
 }
 
 func TestWorkloadAnnotator_OnIndexChange_ClusterScoped(t *testing.T) {
@@ -456,11 +451,8 @@ func TestWorkloadAnnotator_OnIndexChange_ClusterScoped(t *testing.T) {
 
 	wa.OnIndexChange(event)
 
-	wa.mu.Lock()
-	assert.True(t, wa.workloads[workloadKey{Namespace: "team-a"}])
-	assert.True(t, wa.workloads[workloadKey{Namespace: "team-b"}])
-	assert.True(t, wa.workloads[workloadKey{Namespace: "team-c"}])
-	wa.mu.Unlock()
+	// Should have 3 pending updates for team-a, team-b, team-c
+	assert.Equal(t, 3, len(wa.pending))
 }
 
 func TestWorkloadAnnotator_QueueWorkloadUpdate(t *testing.T) {
@@ -558,21 +550,158 @@ func TestWorkloadAnnotator_Worker_ChannelClose(t *testing.T) {
 	}
 }
 
-func TestWorkloadAnnotator_ProcessUpdate_NamespaceLevelSkipped(t *testing.T) {
+func TestWorkloadAnnotator_ProcessUpdate_NamespaceLevel_ResolvesWorkloads(t *testing.T) {
 	scheme := runtime.NewScheme()
-	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "apps", Version: "v1", Resource: "deployments"}:  "DeploymentList",
+		{Group: "apps", Version: "v1", Resource: "statefulsets"}: "StatefulSetList",
+		{Group: "apps", Version: "v1", Resource: "daemonsets"}:   "DaemonSetList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+
+	// Create workloads in the namespace
+	depGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	dep := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "web",
+				"namespace": "test-ns",
+			},
+		},
+	}
+	_, err := dynClient.Resource(depGVR).Namespace("test-ns").Create(context.Background(), dep, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	ssGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
+	ss := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "StatefulSet",
+			"metadata": map[string]interface{}{
+				"name":      "db",
+				"namespace": "test-ns",
+			},
+		},
+	}
+	_, err = dynClient.Resource(ssGVR).Namespace("test-ns").Create(context.Background(), ss, metav1.CreateOptions{})
+	require.NoError(t, err)
+
 	idx := indexer.New(nil)
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), WorkloadAnnotatorOptions{
+		DebounceDuration: 1 * time.Millisecond,
+		Workers:          1,
+	})
 
-	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
-
-	// Namespace-level update (no Kind/Name) should be skipped
+	// Send namespace-level update (empty Kind/Name)
 	update := pendingUpdate{
 		key:       workloadKey{Namespace: "test-ns"},
 		scheduled: time.Now(),
 	}
 
-	// Should not panic
 	wa.processUpdate(context.Background(), update)
+
+	// Drain pending channel and collect queued workload updates
+	var queued []workloadKey
+	for {
+		select {
+		case u := <-wa.pending:
+			queued = append(queued, u.key)
+		default:
+			goto done
+		}
+	}
+done:
+
+	// Should have queued individual workload updates for the deployment and statefulset
+	assert.Len(t, queued, 2)
+
+	keys := map[workloadKey]bool{}
+	for _, k := range queued {
+		keys[k] = true
+	}
+	assert.True(t, keys[workloadKey{Namespace: "test-ns", Kind: "Deployment", Name: "web"}])
+	assert.True(t, keys[workloadKey{Namespace: "test-ns", Kind: "StatefulSet", Name: "db"}])
+}
+
+func TestWorkloadAnnotator_ProcessUpdate_NamespaceLevel_EmptyNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "apps", Version: "v1", Resource: "deployments"}:  "DeploymentList",
+		{Group: "apps", Version: "v1", Resource: "statefulsets"}: "StatefulSetList",
+		{Group: "apps", Version: "v1", Resource: "daemonsets"}:   "DaemonSetList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), WorkloadAnnotatorOptions{
+		DebounceDuration: 1 * time.Millisecond,
+		Workers:          1,
+	})
+
+	// Namespace with no workloads
+	update := pendingUpdate{
+		key:       workloadKey{Namespace: "empty-ns"},
+		scheduled: time.Now(),
+	}
+
+	// Should not panic or error
+	wa.processUpdate(context.Background(), update)
+
+	// Nothing should be queued
+	select {
+	case <-wa.pending:
+		t.Error("Expected no updates for empty namespace")
+	default:
+		// OK
+	}
+}
+
+func TestWorkloadAnnotator_ListNamespaceWorkloads_CacheHit(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "apps", Version: "v1", Resource: "deployments"}:  "DeploymentList",
+		{Group: "apps", Version: "v1", Resource: "statefulsets"}: "StatefulSetList",
+		{Group: "apps", Version: "v1", Resource: "daemonsets"}:   "DaemonSetList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+
+	// Create a deployment
+	depGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	dep := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "app",
+				"namespace": "cached-ns",
+			},
+		},
+	}
+	_, err := dynClient.Resource(depGVR).Namespace("cached-ns").Create(context.Background(), dep, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	idx := indexer.New(nil)
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	ctx := context.Background()
+
+	// First call: cache miss, should list from API
+	result1, err := wa.listNamespaceWorkloads(ctx, "cached-ns")
+	require.NoError(t, err)
+	assert.Len(t, result1, 1)
+
+	// Count actions so far
+	actionCountAfterFirst := len(dynClient.Actions())
+
+	// Second call: cache hit, should NOT call the API again
+	result2, err := wa.listNamespaceWorkloads(ctx, "cached-ns")
+	require.NoError(t, err)
+	assert.Len(t, result2, 1)
+
+	// No new API actions should have been recorded
+	assert.Equal(t, actionCountAfterFirst, len(dynClient.Actions()))
 }
 
 func TestWorkloadAnnotator_ProcessUpdate_WithWorkload(t *testing.T) {
