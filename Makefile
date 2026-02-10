@@ -1,7 +1,8 @@
 # Nightjar Makefile
 
 # Image URL to use all building/pushing image targets
-IMG ?= nightjar:dev
+IMG ?= ghcr.io/cendertdev/nightjar:dev
+WEBHOOK_IMG ?= ghcr.io/cendertdev/nightjar-webhook:dev
 # Controller-gen tool
 CONTROLLER_GEN ?= $(shell which controller-gen 2>/dev/null)
 
@@ -63,18 +64,33 @@ run: fmt vet ## Run controller locally (outside cluster)
 ##@ Container
 
 .PHONY: docker-build
-docker-build: ## Build docker image
-	docker build -t $(IMG) .
+docker-build: ## Build controller docker image
+	docker build --build-arg BINARY=controller -t $(IMG) .
+
+.PHONY: docker-build-webhook
+docker-build-webhook: ## Build webhook docker image
+	docker build --build-arg BINARY=webhook -t $(WEBHOOK_IMG) .
+
+.PHONY: docker-build-all
+docker-build-all: docker-build docker-build-webhook ## Build all docker images
 
 .PHONY: docker-push
-docker-push: ## Push docker image
+docker-push: ## Push controller docker image
 	docker push $(IMG)
+
+.PHONY: docker-push-webhook
+docker-push-webhook: ## Push webhook docker image
+	docker push $(WEBHOOK_IMG)
+
+.PHONY: docker-push-all
+docker-push-all: docker-push docker-push-webhook ## Push all docker images
 
 ##@ Code Generation
 
 .PHONY: manifests
 manifests: controller-gen ## Generate CRD manifests
 	$(CONTROLLER_GEN) crd:allowDangerousTypes=true paths="./api/..." output:crd:artifacts:config=config/crd
+	cp config/crd/*.yaml deploy/helm/crds/
 
 .PHONY: generate
 generate: controller-gen ## Generate deepcopy methods
@@ -102,7 +118,7 @@ helm-template: ## Render Helm chart templates
 	helm template nightjar deploy/helm/
 
 .PHONY: helm-install
-helm-install: ## Install via Helm
+helm-install: manifests ## Install via Helm
 	helm install nightjar deploy/helm/ \
 		--namespace nightjar-system \
 		--create-namespace
@@ -127,8 +143,9 @@ kind-delete: ## Delete the Kind cluster
 	kind delete cluster --name nightjar
 
 .PHONY: kind-load
-kind-load: docker-build ## Load docker image into Kind cluster
+kind-load: docker-build-all ## Load docker images into Kind cluster
 	kind load docker-image $(IMG) --name nightjar
+	kind load docker-image $(WEBHOOK_IMG) --name nightjar
 
 ##@ Verification (used by hack/verify.sh and agents)
 

@@ -21,6 +21,8 @@ Automatic constraint discovery and explanation for Kubernetes.
 
 ## What is Nightjar?
 
+> *Catching bugs in the dark.*
+
 Nightjar is a Kubernetes operator that **discovers all constraints** affecting your workloads—network policies, admission policies, resource quotas, service mesh rules, and more—and **explains them to developers** when things go wrong.
 
 It's not a policy engine. It's a policy *explainer*.

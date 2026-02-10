@@ -20,10 +20,14 @@ spec:
         app.kubernetes.io/component: webhook
     spec:
       serviceAccountName: {{ include "nightjar.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: webhook
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.admissionWebhook.image.repository }}:{{ .Values.admissionWebhook.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.admissionWebhook.image.pullPolicy }}
           command:
             - /webhook
           args:
@@ -76,11 +80,11 @@ spec:
           secret:
             secretName: {{ include "nightjar.fullname" . }}-webhook-tls
       {{- end }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.controller.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

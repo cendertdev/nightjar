@@ -1,4 +1,4 @@
-{{- if and .Values.admissionWebhook.enabled (gt (int .Values.admissionWebhook.replicas) 1) }}
+{{- if and .Values.admissionWebhook.enabled .Values.admissionWebhook.pdb.enabled (gt (int .Values.admissionWebhook.replicas) 1) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -8,7 +8,7 @@ metadata:
     {{- include "nightjar.labels" . | nindent 4 }}
     app.kubernetes.io/component: webhook
 spec:
-  minAvailable: 1
+  minAvailable: {{ .Values.admissionWebhook.pdb.minAvailable }}
   selector:
     matchLabels:
       {{- include "nightjar.selectorLabels" . | nindent 6 }}

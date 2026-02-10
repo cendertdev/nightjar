@@ -14,8 +14,8 @@ keywords:
   - gatekeeper
   - kyverno
   - cilium
-home: https://github.com/nightjarctl/nightjar
+home: https://github.com/cendertdev/nightjar
 sources:
-  - https://github.com/nightjarctl/nightjar
+  - https://github.com/cendertdev/nightjar
 maintainers:
-  - name: yourorg
+  - name: cendertdev

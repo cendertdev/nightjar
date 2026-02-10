@@ -1,0 +1,90 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: constraintprofiles.nightjar.io
+spec:
+  group: nightjar.io
+  names:
+    kind: ConstraintProfile
+    listKind: ConstraintProfileList
+    plural: constraintprofiles
+    shortNames:
+    - cp
+    singular: constraintprofile
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ConstraintProfile configures how a specific CRD type is treated by the
+          discovery engine. Platform admins use this to register custom policy CRDs
+          or tune adapter behavior.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              adapter:
+                description: |-
+                  Adapter is the name of the adapter to use for parsing.
+                  Use "generic" for unknown CRDs or the name of a built-in adapter.
+                type: string
+              debounceSeconds:
+                description: DebounceSeconds overrides the default debounce interval
+                  for notifications.
+                type: integer
+              enabled:
+                default: true
+                description: Enabled controls whether this resource type is watched.
+                type: boolean
+              gvr:
+                description: GVR identifies the target resource type.
+                properties:
+                  group:
+                    type: string
+                  resource:
+                    type: string
+                  version:
+                    type: string
+                required:
+                - group
+                - resource
+                - version
+                type: object
+              severity:
+                description: Severity overrides the default severity for constraints
+                  from this source.
+                enum:
+                - Critical
+                - Warning
+                - Info
+                type: string
+            required:
+            - adapter
+            - enabled
+            - gvr
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true

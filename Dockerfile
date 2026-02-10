@@ -1,4 +1,7 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
+
+ARG BINARY=controller
+ARG TARGETARCH=amd64
 
 WORKDIR /workspace
 
@@ -8,16 +11,16 @@ RUN go mod download
 
 # Build
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-s -w" \
-    -o controller ./cmd/controller/
+    -o app ./cmd/${BINARY}/
 
 # ---
 
 FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /
-COPY --from=builder /workspace/controller .
+COPY --from=builder /workspace/app .
 USER 65532:65532
 
-ENTRYPOINT ["/controller"]
+ENTRYPOINT ["/app"]

@@ -60,7 +60,10 @@ webhooks:
             - kube-system
             - kube-public
             - kube-node-lease
+            - {{ .Release.Namespace }}
             {{- range .Values.admissionWebhook.excludedNamespaces }}
+            {{- if ne . $.Release.Namespace }}
             - {{ . }}
+            {{- end }}
             {{- end }}
 {{- end }}

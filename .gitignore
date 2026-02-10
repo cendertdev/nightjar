@@ -36,8 +36,8 @@ Thumbs.db
 deploy/helm/charts/
 *.tgz
 
-# Generated CRDs (regenerate with make manifests)
-config/crd/*.yaml
+# Generated CRDs are tracked in git for Helm chart bundling.
+# Regenerate with: make manifests
 
 # Local environment
 .env
@@ -59,3 +59,4 @@ docs/.jekyll-metadata
 docs/.sass-cache/
 docs/Gemfile.lock
 docs/.bundle/
+.claude/

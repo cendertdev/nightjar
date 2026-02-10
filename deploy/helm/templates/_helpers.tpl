@@ -25,7 +25,7 @@ Create a default fully qualified app name.
 Common labels
 */}}
 {{- define "nightjar.labels" -}}
-helm.sh/chart: {{ include "nightjar.name" . }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 app.kubernetes.io/name: {{ include "nightjar.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
