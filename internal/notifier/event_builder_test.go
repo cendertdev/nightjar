@@ -339,6 +339,219 @@ func TestGuessUnit(t *testing.T) {
 	}
 }
 
+// --- New tests to boost coverage ---
+
+func TestGenericSummary_AllTypes(t *testing.T) {
+	tests := []struct {
+		ct       types.ConstraintType
+		contains string
+	}{
+		{types.ConstraintTypeNetworkIngress, "Inbound network traffic"},
+		{types.ConstraintTypeNetworkEgress, "Outbound network traffic"},
+		{types.ConstraintTypeAdmission, "admission policy"},
+		{types.ConstraintTypeResourceLimit, "quotas or limits"},
+		{types.ConstraintTypeMeshPolicy, "mesh policies"},
+		{types.ConstraintTypeMissing, "companion resource"},
+		{types.ConstraintType("SomeUnknown"), "policy constraint"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.ct), func(t *testing.T) {
+			result := genericSummary(tt.ct)
+			assert.Contains(t, result, tt.contains)
+		})
+	}
+}
+
+func TestEventBuilder_ExtractMetrics_NilDetails(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{Details: nil}
+	metrics := eb.extractMetrics(c)
+	assert.Nil(t, metrics)
+}
+
+func TestEventBuilder_ExtractMetrics_NoResourcesKey(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{
+		Details: map[string]interface{}{
+			"other": "data",
+		},
+	}
+	metrics := eb.extractMetrics(c)
+	assert.Nil(t, metrics)
+}
+
+func TestEventBuilder_ExtractMetrics_InvalidResourceEntry(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{
+		Details: map[string]interface{}{
+			"resources": map[string]interface{}{
+				"cpu":     "not-a-map",
+				"memory":  42,
+				"storage": map[string]interface{}{"hard": "100Gi", "used": "50Gi", "percent": 50},
+			},
+		},
+	}
+	metrics := eb.extractMetrics(c)
+	require.NotNil(t, metrics)
+	assert.Len(t, metrics, 1)
+	assert.Contains(t, metrics, "storage")
+}
+
+func TestEventBuilder_ExtractMetrics_FloatPercent(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{
+		Details: map[string]interface{}{
+			"resources": map[string]interface{}{
+				"memory": map[string]interface{}{
+					"hard":    "16Gi",
+					"used":    "12Gi",
+					"percent": 75.5,
+				},
+			},
+		},
+	}
+	metrics := eb.extractMetrics(c)
+	require.NotNil(t, metrics)
+	assert.Equal(t, 75.5, metrics["memory"].PercentUsed)
+	assert.Equal(t, "bytes", metrics["memory"].Unit)
+}
+
+func TestEventBuilder_ScopedSummary_FullLevel(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{
+		Summary:        "Specific details about the constraint",
+		ConstraintType: types.ConstraintTypeNetworkEgress,
+	}
+
+	result := eb.scopedSummary(c, types.DetailLevelFull)
+	assert.Equal(t, "Specific details about the constraint", result)
+}
+
+func TestEventBuilder_ScopedSummary_DetailedLevel(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{
+		Summary:        "Detailed summary text",
+		ConstraintType: types.ConstraintTypeNetworkEgress,
+	}
+
+	result := eb.scopedSummary(c, types.DetailLevelDetailed)
+	assert.Equal(t, "Detailed summary text", result)
+}
+
+func TestEventBuilder_ScopedSummary_SummaryLevel(t *testing.T) {
+	eb := NewEventBuilder("test@example.com")
+
+	c := types.Constraint{
+		Summary:        "Should not see this at summary level",
+		ConstraintType: types.ConstraintTypeNetworkEgress,
+	}
+
+	result := eb.scopedSummary(c, types.DetailLevelSummary)
+	assert.Contains(t, result, "Outbound network traffic")
+	assert.NotContains(t, result, "Should not see this")
+}
+
+func TestEventBuilder_BuildAnnotations_NoRemediationContact(t *testing.T) {
+	eb := NewEventBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("uid-nocontact"),
+		Name:           "test-policy",
+		Namespace:      "team-alpha",
+		ConstraintType: types.ConstraintTypeNetworkIngress,
+		Severity:       types.SeverityInfo,
+		Effect:         "restrict",
+		Source: schema.GroupVersionResource{
+			Group:    "networking.k8s.io",
+			Version:  "v1",
+			Resource: "networkpolicies",
+		},
+	}
+
+	workload := WorkloadRef{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "test-deploy",
+		Namespace:  "team-alpha",
+	}
+
+	event := eb.BuildEvent(c, types.DetailLevelDetailed, workload, "Test message")
+
+	// Should have annotations
+	assert.Equal(t, annotations.ManagedByValue, event.Annotations[annotations.ManagedBy])
+	assert.Equal(t, "NetworkIngress", event.Annotations[annotations.EventConstraintType])
+	assert.Equal(t, "Info", event.Annotations[annotations.EventSeverity])
+
+	// Info severity should produce Normal event type
+	assert.Equal(t, "Normal", event.Type)
+}
+
+func TestEventBuilder_BuildEvent_ClusterScoped(t *testing.T) {
+	eb := NewEventBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("cluster-uid"),
+		Name:           "cluster-policy",
+		Namespace:      "", // cluster-scoped
+		ConstraintType: types.ConstraintTypeAdmission,
+		Severity:       types.SeverityCritical,
+		Effect:         "deny",
+		Source: schema.GroupVersionResource{
+			Group:    "admissionregistration.k8s.io",
+			Version:  "v1",
+			Resource: "validatingwebhookconfigurations",
+		},
+	}
+
+	workload := WorkloadRef{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "my-app",
+		Namespace:  "default",
+	}
+
+	event := eb.BuildEvent(c, types.DetailLevelDetailed, workload, "Cluster admission")
+
+	// Cluster-scoped constraint namespace should not appear in annotations
+	_, hasNs := event.Annotations[annotations.EventConstraintNamespace]
+	assert.False(t, hasNs, "Cluster-scoped constraint should not have namespace annotation")
+}
+
+func TestGvrToKind_EventBuilder(t *testing.T) {
+	tests := []struct {
+		resource string
+		expected string
+	}{
+		{"networkpolicies", "Networkpolicy"},   // event_builder uses different singularization
+		{"resourcequotas", "Resourcequota"},
+		{"pods", "Pod"},
+		{"deployments", "Deployment"},
+		{"customthings", "Customthing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.resource, func(t *testing.T) {
+			gvr := schema.GroupVersionResource{Resource: tt.resource}
+			result := gvrToKind(gvr)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGvrToKind_EventBuilder_IesSuffix(t *testing.T) {
+	// The event_builder gvrToKind has special handling for "ies" suffix
+	gvr := schema.GroupVersionResource{Resource: "networkpolicies"}
+	result := gvrToKind(gvr)
+	assert.Equal(t, "Networkpolicy", result)
+}
+
 func TestEventBuilder_RemediationInAnnotations(t *testing.T) {
 	eb := NewEventBuilder("security-team@example.com")
 

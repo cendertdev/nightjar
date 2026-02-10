@@ -325,3 +325,167 @@ func TestDetermineRuleType(t *testing.T) {
 		})
 	}
 }
+
+func TestMapRuleTypeToConstraintType(t *testing.T) {
+	tests := []struct {
+		ruleType     string
+		expectedType types.ConstraintType
+	}{
+		{"validate", types.ConstraintTypeAdmission},
+		{"verifyImages", types.ConstraintTypeAdmission},
+		{"mutate", types.ConstraintTypeAdmission},
+		{"generate", types.ConstraintTypeAdmission},
+		{"unknown", types.ConstraintTypeUnknown},
+		{"somethingelse", types.ConstraintTypeUnknown},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.ruleType, func(t *testing.T) {
+			assert.Equal(t, tc.expectedType, mapRuleTypeToConstraintType(tc.ruleType))
+		})
+	}
+}
+
+func TestAdapter_Parse_MatchAllClause(t *testing.T) {
+	adapter := New()
+
+	// Policy using match.all instead of match.any
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "kyverno.io/v1",
+			"kind":       "ClusterPolicy",
+			"metadata": map[string]interface{}{
+				"name": "match-all-policy",
+				"uid":  "uid-match-all",
+			},
+			"spec": map[string]interface{}{
+				"validationFailureAction": "Enforce",
+				"rules": []interface{}{
+					map[string]interface{}{
+						"name": "require-annotation",
+						"match": map[string]interface{}{
+							"all": []interface{}{
+								map[string]interface{}{
+									"resources": map[string]interface{}{
+										"kinds":      []interface{}{"Deployment"},
+										"namespaces": []interface{}{"production"},
+										"selector": map[string]interface{}{
+											"matchLabels": map[string]interface{}{
+												"tier": "frontend",
+											},
+										},
+									},
+								},
+							},
+						},
+						"validate": map[string]interface{}{
+							"message": "Annotation team is required",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	constraints, err := adapter.Parse(context.Background(), obj)
+	require.NoError(t, err)
+	require.Len(t, constraints, 1)
+
+	c := constraints[0]
+	assert.Equal(t, "match-all-policy/require-annotation", c.Name)
+	assert.Equal(t, types.SeverityCritical, c.Severity)
+	assert.ElementsMatch(t, []string{"production"}, c.AffectedNamespaces)
+	require.NotNil(t, c.WorkloadSelector)
+	assert.Equal(t, "frontend", c.WorkloadSelector.MatchLabels["tier"])
+	require.NotEmpty(t, c.ResourceTargets)
+	assert.Contains(t, c.ResourceTargets[0].Resources, "deployments")
+}
+
+func TestAdapter_Parse_LegacyMatchResources(t *testing.T) {
+	adapter := New()
+
+	// Policy using legacy match.resources (directly on match, not inside any/all)
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "kyverno.io/v1",
+			"kind":       "ClusterPolicy",
+			"metadata": map[string]interface{}{
+				"name": "legacy-match-policy",
+				"uid":  "uid-legacy-match",
+			},
+			"spec": map[string]interface{}{
+				"validationFailureAction": "Audit",
+				"rules": []interface{}{
+					map[string]interface{}{
+						"name": "check-labels",
+						"match": map[string]interface{}{
+							"resources": map[string]interface{}{
+								"kinds":      []interface{}{"Pod", "apps/Deployment"},
+								"namespaces": []interface{}{"staging", "production"},
+							},
+						},
+						"validate": map[string]interface{}{
+							"message": "Labels are required",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	constraints, err := adapter.Parse(context.Background(), obj)
+	require.NoError(t, err)
+	require.Len(t, constraints, 1)
+
+	c := constraints[0]
+	assert.Equal(t, types.SeverityWarning, c.Severity)
+	assert.ElementsMatch(t, []string{"staging", "production"}, c.AffectedNamespaces)
+	require.NotEmpty(t, c.ResourceTargets)
+	// "Pod" becomes "pods", "apps/Deployment" becomes apiGroup=apps, resource=deployments
+	assert.Contains(t, c.ResourceTargets[0].Resources, "pods")
+	assert.Contains(t, c.ResourceTargets[0].Resources, "deployments")
+	assert.Contains(t, c.ResourceTargets[0].APIGroups, "apps")
+}
+
+func TestAdapter_Parse_UnknownRuleType(t *testing.T) {
+	adapter := New()
+
+	// Policy with an unrecognized rule type should fail with "no valid rules parsed"
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "kyverno.io/v1",
+			"kind":       "ClusterPolicy",
+			"metadata": map[string]interface{}{
+				"name": "bad-rule-type-policy",
+				"uid":  "uid-bad-rule",
+			},
+			"spec": map[string]interface{}{
+				"rules": []interface{}{
+					map[string]interface{}{
+						"name": "weird-rule",
+						"match": map[string]interface{}{
+							"any": []interface{}{
+								map[string]interface{}{
+									"resources": map[string]interface{}{
+										"kinds": []interface{}{"Pod"},
+									},
+								},
+							},
+						},
+						"customAction": map[string]interface{}{
+							"something": "else",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	constraints, err := adapter.Parse(context.Background(), obj)
+	require.NoError(t, err)
+	require.Len(t, constraints, 1)
+
+	c := constraints[0]
+	assert.Equal(t, types.ConstraintTypeUnknown, c.ConstraintType)
+	assert.Equal(t, "unknown", c.Effect)
+}

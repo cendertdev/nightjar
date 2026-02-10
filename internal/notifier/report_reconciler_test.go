@@ -2,6 +2,7 @@ package notifier
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -9,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -337,6 +339,297 @@ func TestReportReconciler_ExtractResourceMetrics_NilDetails(t *testing.T) {
 
 	metrics := rr.extractResourceMetrics(c)
 	assert.Nil(t, metrics)
+}
+
+// --- New tests to boost coverage ---
+
+func TestScopedMessage_AllDetailLevels(t *testing.T) {
+	tests := []struct {
+		name         string
+		detailLevel  types.DetailLevel
+		constraintNS string
+		viewerNS     string
+		summary      string
+		ctType       types.ConstraintType
+		expected     string
+	}{
+		{
+			name:         "summary level cross namespace returns generic",
+			detailLevel:  types.DetailLevelSummary,
+			constraintNS: "kube-system",
+			viewerNS:     "team-alpha",
+			summary:      "Specific details about policy",
+			ctType:       types.ConstraintTypeNetworkEgress,
+			expected:     "Outbound network traffic is restricted by a network policy",
+		},
+		{
+			name:         "summary level same namespace returns actual summary",
+			detailLevel:  types.DetailLevelSummary,
+			constraintNS: "team-alpha",
+			viewerNS:     "team-alpha",
+			summary:      "My specific summary",
+			ctType:       types.ConstraintTypeNetworkEgress,
+			expected:     "My specific summary",
+		},
+		{
+			name:         "summary level cluster-scoped returns actual summary",
+			detailLevel:  types.DetailLevelSummary,
+			constraintNS: "",
+			viewerNS:     "team-alpha",
+			summary:      "Cluster policy summary",
+			ctType:       types.ConstraintTypeAdmission,
+			expected:     "Cluster policy summary",
+		},
+		{
+			name:         "detailed level returns actual summary",
+			detailLevel:  types.DetailLevelDetailed,
+			constraintNS: "kube-system",
+			viewerNS:     "team-alpha",
+			summary:      "Detailed summary",
+			ctType:       types.ConstraintTypeNetworkIngress,
+			expected:     "Detailed summary",
+		},
+		{
+			name:         "empty summary falls back to generic",
+			detailLevel:  types.DetailLevelDetailed,
+			constraintNS: "team-alpha",
+			viewerNS:     "team-alpha",
+			summary:      "",
+			ctType:       types.ConstraintTypeResourceLimit,
+			expected:     "Resource quotas or limits apply to this namespace",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := &ReportReconciler{
+				opts: ReportReconcilerOptions{
+					DefaultDetailLevel: tt.detailLevel,
+				},
+			}
+
+			c := types.Constraint{
+				Name:           "test-policy",
+				Namespace:      tt.constraintNS,
+				Summary:        tt.summary,
+				ConstraintType: tt.ctType,
+			}
+
+			result := rr.scopedMessage(c, tt.viewerNS)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGvrToKindName_GenericFallback(t *testing.T) {
+	tests := []struct {
+		resource string
+		expected string
+	}{
+		{"ciliumclusterwidenetworkpolicies", "CiliumClusterwideNetworkPolicy"},
+		{"fooconfigs", "Fooconfig"},     // generic: strips s, capitalizes
+		{"x", "X"},                       // single char, no trailing s
+		{"", ""},                          // empty string
+		{"mesh", "Mesh"},                 // no trailing s, just capitalize
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.resource, func(t *testing.T) {
+			gvr := schema.GroupVersionResource{Resource: tt.resource}
+			result := gvrToKindName(gvr)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestSeverityOrder_AllValues(t *testing.T) {
+	assert.Equal(t, 0, severityOrder("Critical"))
+	assert.Equal(t, 1, severityOrder("Warning"))
+	assert.Equal(t, 2, severityOrder("Info"))
+	assert.Equal(t, 3, severityOrder("Unknown"))
+	assert.Equal(t, 3, severityOrder(""))
+	assert.Equal(t, 3, severityOrder("garbage"))
+}
+
+func TestReportReconciler_BuildReportStatus_EmptyConstraints(t *testing.T) {
+	rr := &ReportReconciler{
+		logger:             zap.NewNop(),
+		remediationBuilder: NewRemediationBuilder("platform@example.com"),
+		opts: ReportReconcilerOptions{
+			DefaultDetailLevel: types.DetailLevelSummary,
+			DefaultContact:     "platform@example.com",
+		},
+	}
+
+	status := rr.buildReportStatus(nil, "team-alpha")
+
+	assert.Equal(t, 0, status.ConstraintCount)
+	assert.Equal(t, 0, status.CriticalCount)
+	assert.Equal(t, 0, status.WarningCount)
+	assert.Equal(t, 0, status.InfoCount)
+	assert.Empty(t, status.Constraints)
+	require.NotNil(t, status.MachineReadable)
+	assert.Equal(t, "1", status.MachineReadable.SchemaVersion)
+}
+
+func TestReportReconciler_BuildMachineEntry_WithResourceMetrics(t *testing.T) {
+	rr := &ReportReconciler{
+		logger:             zap.NewNop(),
+		remediationBuilder: NewRemediationBuilder("platform@example.com"),
+		opts: ReportReconcilerOptions{
+			DefaultDetailLevel: types.DetailLevelDetailed,
+		},
+	}
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("quota-uid"),
+		Name:           "cpu-quota",
+		Namespace:      "team-alpha",
+		ConstraintType: types.ConstraintTypeResourceLimit,
+		Severity:       types.SeverityWarning,
+		Effect:         "limit",
+		Source:         schema.GroupVersionResource{Group: "", Version: "v1", Resource: "resourcequotas"},
+		Details: map[string]interface{}{
+			"resources": map[string]interface{}{
+				"cpu": map[string]interface{}{
+					"hard":    "8",
+					"used":    "7",
+					"percent": 87.5,
+				},
+			},
+		},
+	}
+
+	entry := rr.buildMachineEntry(c, "team-alpha")
+
+	require.NotNil(t, entry.Metrics)
+	cpuMetric, ok := entry.Metrics["cpu"]
+	require.True(t, ok)
+	assert.Equal(t, "8", cpuMetric.Hard)
+	assert.Equal(t, "7", cpuMetric.Used)
+	assert.Equal(t, 87.5, cpuMetric.PercentUsed)
+	assert.Equal(t, "cores", cpuMetric.Unit)
+}
+
+func TestReportReconciler_BuildMachineEntry_NoMetricsForNonResourceLimit(t *testing.T) {
+	rr := &ReportReconciler{
+		logger:             zap.NewNop(),
+		remediationBuilder: NewRemediationBuilder("platform@example.com"),
+		opts: ReportReconcilerOptions{
+			DefaultDetailLevel: types.DetailLevelDetailed,
+		},
+	}
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("net-uid"),
+		Name:           "test-netpol",
+		Namespace:      "team-alpha",
+		ConstraintType: types.ConstraintTypeNetworkEgress,
+		Severity:       types.SeverityWarning,
+		Effect:         "restrict",
+		Source:         schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"},
+	}
+
+	entry := rr.buildMachineEntry(c, "team-alpha")
+
+	assert.Nil(t, entry.Metrics, "Non-resource-limit constraint should not have metrics")
+}
+
+func TestNewReportReconciler(t *testing.T) {
+	idx := &indexer.Indexer{}
+	logger := zap.NewNop()
+	opts := DefaultReportReconcilerOptions()
+
+	rr := NewReportReconciler(nil, idx, logger, opts)
+
+	require.NotNil(t, rr)
+	assert.NotNil(t, rr.remediationBuilder)
+	assert.NotNil(t, rr.lastReconcile)
+	assert.NotNil(t, rr.pendingTriggers)
+	assert.Equal(t, types.DetailLevelSummary, rr.opts.DefaultDetailLevel)
+}
+
+func TestNewReportReconciler_ZeroValues(t *testing.T) {
+	idx := &indexer.Indexer{}
+	logger := zap.NewNop()
+	opts := ReportReconcilerOptions{} // all zero
+
+	rr := NewReportReconciler(nil, idx, logger, opts)
+
+	// Should apply defaults
+	assert.Equal(t, 10*time.Second, rr.opts.DebounceDuration)
+	assert.Equal(t, types.DetailLevelSummary, rr.opts.DefaultDetailLevel)
+}
+
+func TestReportReconciler_OnIndexChange(t *testing.T) {
+	rr := &ReportReconciler{
+		logger:          zap.NewNop(),
+		pendingTriggers: make(map[string]bool),
+		lastReconcile:   make(map[string]time.Time),
+	}
+
+	event := indexer.IndexEvent{
+		Type: "upsert",
+		Constraint: types.Constraint{
+			Name:               "test-policy",
+			Namespace:          "team-alpha",
+			AffectedNamespaces: []string{"team-alpha", "team-beta"},
+		},
+	}
+
+	rr.OnIndexChange(event)
+
+	// Should have pending triggers for all namespaces
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	assert.True(t, rr.pendingTriggers["team-alpha"])
+	assert.True(t, rr.pendingTriggers["team-beta"])
+}
+
+func TestReportReconciler_OnIndexChange_ClusterScoped(t *testing.T) {
+	rr := &ReportReconciler{
+		logger:          zap.NewNop(),
+		pendingTriggers: make(map[string]bool),
+		lastReconcile:   make(map[string]time.Time),
+	}
+
+	event := indexer.IndexEvent{
+		Type: "upsert",
+		Constraint: types.Constraint{
+			Name:               "cluster-policy",
+			Namespace:          "", // cluster-scoped
+			AffectedNamespaces: []string{"ns-a", "ns-b", "ns-c"},
+		},
+	}
+
+	rr.OnIndexChange(event)
+
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	assert.True(t, rr.pendingTriggers["ns-a"])
+	assert.True(t, rr.pendingTriggers["ns-b"])
+	assert.True(t, rr.pendingTriggers["ns-c"])
+	// No namespace "" should be in pendingTriggers
+	assert.False(t, rr.pendingTriggers[""])
+}
+
+func TestReportReconciler_ExtractResourceMetrics_NonMapEntry(t *testing.T) {
+	rr := &ReportReconciler{}
+
+	c := types.Constraint{
+		Details: map[string]interface{}{
+			"resources": map[string]interface{}{
+				"cpu":     "not-a-map",
+				"memory":  42,
+				"storage": map[string]interface{}{"hard": "100Gi", "used": "50Gi", "percent": 50},
+			},
+		},
+	}
+
+	metrics := rr.extractResourceMetrics(c)
+	require.NotNil(t, metrics)
+	assert.Len(t, metrics, 1)
+	assert.Contains(t, metrics, "storage")
 }
 
 func TestReportReconciler_ExtractResourceMetrics_NoResources(t *testing.T) {

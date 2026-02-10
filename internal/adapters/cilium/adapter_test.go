@@ -234,3 +234,224 @@ func TestUniqueStrings(t *testing.T) {
 	assert.Contains(t, result, "c")
 	assert.Contains(t, result, "d")
 }
+
+func TestParse_WithL7KafkaDnsRules(t *testing.T) {
+	a := New()
+	obj := loadFixture(t, "testdata/l7_kafka_dns.yaml")
+
+	constraints, err := a.Parse(context.Background(), obj)
+	require.NoError(t, err)
+	require.Len(t, constraints, 1)
+
+	c := constraints[0]
+	assert.Equal(t, "kafka-dns-policy", c.Name)
+	assert.Equal(t, "streaming", c.Namespace)
+	assert.Equal(t, types.ConstraintTypeNetworkEgress, c.ConstraintType)
+	assert.Equal(t, types.SeverityWarning, c.Severity)
+	assert.Contains(t, c.Summary, "L7")
+
+	// Check L7 types in details
+	require.NotNil(t, c.Details)
+	l7Types, ok := c.Details["l7Types"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, l7Types, "kafka")
+	assert.Contains(t, l7Types, "dns")
+
+	// Check ports
+	ports, ok := c.Details["ports"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, ports, "9092/TCP")
+	assert.Contains(t, ports, "53/UDP")
+}
+
+func TestParse_WithCIDRExcept(t *testing.T) {
+	a := New()
+	obj := loadFixture(t, "testdata/cidr_except.yaml")
+
+	constraints, err := a.Parse(context.Background(), obj)
+	require.NoError(t, err)
+	require.Len(t, constraints, 1)
+
+	c := constraints[0]
+	assert.Equal(t, "cidr-except-policy", c.Name)
+	assert.Equal(t, "production", c.Namespace)
+	assert.Equal(t, types.ConstraintTypeNetworkEgress, c.ConstraintType)
+
+	// Check CIDRs in details
+	require.NotNil(t, c.Details)
+	cidrs, ok := c.Details["cidrs"].([]string)
+	require.True(t, ok)
+	// toCIDR should include 10.0.0.0/8
+	assert.Contains(t, cidrs, "10.0.0.0/8")
+	// toCIDRSet should include 192.168.0.0/16 (the cidr field)
+	assert.Contains(t, cidrs, "192.168.0.0/16")
+}
+
+func TestParse_SpecsAsList(t *testing.T) {
+	a := New()
+	obj := loadFixture(t, "testdata/specs_list.yaml")
+
+	constraints, err := a.Parse(context.Background(), obj)
+	require.NoError(t, err)
+
+	// specs_list.yaml has 2 specs: one with ingress, one with egress
+	require.Len(t, constraints, 2)
+
+	// Find ingress and egress constraints
+	var ingressC, egressC types.Constraint
+	for _, c := range constraints {
+		if c.ConstraintType == types.ConstraintTypeNetworkIngress {
+			ingressC = c
+		} else if c.ConstraintType == types.ConstraintTypeNetworkEgress {
+			egressC = c
+		}
+	}
+
+	assert.Equal(t, "multi-spec-policy", ingressC.Name)
+	assert.Equal(t, types.ConstraintTypeNetworkIngress, ingressC.ConstraintType)
+	assert.Equal(t, types.SeverityWarning, ingressC.Severity)
+	assert.Equal(t, "restrict", ingressC.Effect)
+
+	// Check ingress ports
+	require.NotNil(t, ingressC.Details)
+	ports, ok := ingressC.Details["ports"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, ports, "80/TCP")
+
+	assert.Equal(t, "multi-spec-policy", egressC.Name)
+	assert.Equal(t, types.ConstraintTypeNetworkEgress, egressC.ConstraintType)
+	assert.Equal(t, types.SeverityWarning, egressC.Severity)
+
+	// Check egress ports
+	require.NotNil(t, egressC.Details)
+	ePorts, ok := egressC.Details["ports"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, ePorts, "5432/TCP")
+}
+
+func TestHasL7Rules_AllTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		rule     map[string]interface{}
+		expected bool
+	}{
+		{
+			name: "http rule",
+			rule: map[string]interface{}{
+				"toPorts": []interface{}{
+					map[string]interface{}{
+						"rules": map[string]interface{}{
+							"http": []interface{}{
+								map[string]interface{}{"method": "GET"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "kafka rule",
+			rule: map[string]interface{}{
+				"toPorts": []interface{}{
+					map[string]interface{}{
+						"rules": map[string]interface{}{
+							"kafka": []interface{}{
+								map[string]interface{}{"topic": "events"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "dns rule",
+			rule: map[string]interface{}{
+				"toPorts": []interface{}{
+					map[string]interface{}{
+						"rules": map[string]interface{}{
+							"dns": []interface{}{
+								map[string]interface{}{"matchPattern": "*.local"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "l7 generic rule",
+			rule: map[string]interface{}{
+				"toPorts": []interface{}{
+					map[string]interface{}{
+						"rules": map[string]interface{}{
+							"l7": []interface{}{
+								map[string]interface{}{"action": "allow"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "l7proto rule",
+			rule: map[string]interface{}{
+				"toPorts": []interface{}{
+					map[string]interface{}{
+						"rules": map[string]interface{}{
+							"l7proto": "memcached",
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "no L7 rules",
+			rule: map[string]interface{}{
+				"toPorts": []interface{}{
+					map[string]interface{}{
+						"ports": []interface{}{
+							map[string]interface{}{"port": "80"},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:     "empty rule",
+			rule:     map[string]interface{}{},
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, hasL7Rules(tc.rule))
+		})
+	}
+}
+
+func TestExtractCIDRs_WithCIDRSet(t *testing.T) {
+	rule := map[string]interface{}{
+		"toCIDR": []interface{}{"10.0.0.0/8", "172.16.0.0/12"},
+		"toCIDRSet": []interface{}{
+			map[string]interface{}{
+				"cidr":   "192.168.0.0/16",
+				"except": []interface{}{"192.168.1.0/24"},
+			},
+			map[string]interface{}{
+				"cidr": "203.0.113.0/24",
+			},
+		},
+	}
+
+	cidrs := extractCIDRs(rule, "toCIDR", "toCIDRSet")
+	assert.Contains(t, cidrs, "10.0.0.0/8")
+	assert.Contains(t, cidrs, "172.16.0.0/12")
+	assert.Contains(t, cidrs, "192.168.0.0/16")
+	assert.Contains(t, cidrs, "203.0.113.0/24")
+}

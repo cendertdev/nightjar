@@ -368,6 +368,261 @@ func TestRemediationBuilder_ResolveContact(t *testing.T) {
 	}
 }
 
+// --- New tests to boost coverage ---
+
+func TestNewRemediationBuilder_EmptyContact(t *testing.T) {
+	rb := NewRemediationBuilder("")
+	assert.Equal(t, "your platform team", rb.DefaultContact)
+}
+
+func TestNewRemediationBuilder_WithContact(t *testing.T) {
+	rb := NewRemediationBuilder("team@example.com")
+	assert.Equal(t, "team@example.com", rb.DefaultContact)
+}
+
+func TestRemediationBuilder_ConvertSteps_EmptySummary(t *testing.T) {
+	rb := NewRemediationBuilder("test@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("convert-uid"),
+		Name:           "test-policy",
+		ConstraintType: types.ConstraintTypeNetworkEgress,
+		RemediationHint: "", // empty hint - should fall back to generateSummary
+		Remediation: []types.RemediationStep{
+			{
+				Type:        "manual",
+				Description: "Do something",
+			},
+		},
+	}
+
+	result := rb.Build(c)
+	// Should use generateSummary since RemediationHint is empty
+	assert.NotEmpty(t, result.Summary)
+	assert.Contains(t, result.Summary, "egress")
+	require.Len(t, result.Steps, 1)
+}
+
+func TestRemediationBuilder_ConvertSteps_AllFields(t *testing.T) {
+	rb := NewRemediationBuilder("test@example.com")
+
+	c := types.Constraint{
+		UID:             k8stypes.UID("all-fields"),
+		RemediationHint: "Custom hint",
+		Remediation: []types.RemediationStep{
+			{
+				Type:              "kubectl",
+				Description:       "Run command",
+				Command:           "kubectl get pods",
+				RequiresPrivilege: "developer",
+			},
+			{
+				Type:        "yaml_patch",
+				Description: "Apply patch",
+				Patch:       "patch-data",
+				Template:    "template-data",
+			},
+			{
+				Type:    "link",
+				Description: "See docs",
+				URL:     "https://example.com",
+			},
+			{
+				Type:    "manual",
+				Description: "Contact someone",
+				Contact: "admin@example.com",
+			},
+		},
+	}
+
+	result := rb.Build(c)
+	assert.Equal(t, "Custom hint", result.Summary)
+	require.Len(t, result.Steps, 4)
+
+	assert.Equal(t, "kubectl get pods", result.Steps[0].Command)
+	assert.Equal(t, "patch-data", result.Steps[1].Patch)
+	assert.Equal(t, "template-data", result.Steps[1].Template)
+	assert.Equal(t, "https://example.com", result.Steps[2].URL)
+	assert.Equal(t, "admin@example.com", result.Steps[3].Contact)
+}
+
+func TestRemediationBuilder_GenerateSummary_AllTypes(t *testing.T) {
+	rb := NewRemediationBuilder("team@example.com")
+
+	tests := []struct {
+		ct       types.ConstraintType
+		contains string
+	}{
+		{types.ConstraintTypeNetworkIngress, "ingress exception"},
+		{types.ConstraintTypeNetworkEgress, "egress exception"},
+		{types.ConstraintTypeAdmission, "admission policy"},
+		{types.ConstraintTypeResourceLimit, "quota increase"},
+		{types.ConstraintTypeMeshPolicy, "mesh policy"},
+		{types.ConstraintTypeMissing, "missing companion"},
+		{types.ConstraintTypeUnknown, "team@example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.ct), func(t *testing.T) {
+			c := types.Constraint{ConstraintType: tt.ct}
+			summary := rb.generateSummary(c)
+			assert.Contains(t, summary, tt.contains)
+		})
+	}
+}
+
+func TestRemediationBuilder_GenerateSummary_WithHint(t *testing.T) {
+	rb := NewRemediationBuilder("team@example.com")
+
+	c := types.Constraint{
+		ConstraintType:  types.ConstraintTypeNetworkEgress,
+		RemediationHint: "This is a custom hint",
+	}
+
+	summary := rb.generateSummary(c)
+	assert.Equal(t, "This is a custom hint", summary)
+}
+
+func TestRemediationBuilder_MissingResource_NoExpectedKind(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("no-kind"),
+		Name:           "generic-missing",
+		Namespace:      "test-ns",
+		ConstraintType: types.ConstraintTypeMissing,
+		Details:        map[string]interface{}{},
+	}
+
+	result := rb.Build(c)
+	assert.NotEmpty(t, result.Summary)
+	// Should still have manual contact step
+	hasManual := false
+	for _, step := range result.Steps {
+		if step.Type == "manual" {
+			hasManual = true
+		}
+	}
+	assert.True(t, hasManual)
+}
+
+func TestRemediationBuilder_MissingResource_NilDetails(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("nil-details"),
+		Name:           "nil-missing",
+		Namespace:      "test-ns",
+		ConstraintType: types.ConstraintTypeMissing,
+		Details:        nil,
+	}
+
+	result := rb.Build(c)
+	assert.NotEmpty(t, result.Summary)
+}
+
+func TestRemediationBuilder_MissingResource_UnknownKind(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("unknown-kind"),
+		Name:           "missing-unknown",
+		Namespace:      "test-ns",
+		ConstraintType: types.ConstraintTypeMissing,
+		Details: map[string]interface{}{
+			"expectedKind": "SomeCustomKind",
+		},
+	}
+
+	result := rb.Build(c)
+	// Unknown kind should not have yaml_patch step
+	for _, step := range result.Steps {
+		if step.Type == "yaml_patch" {
+			t.Error("Should not have yaml_patch for unknown kind")
+		}
+	}
+}
+
+func TestRemediationBuilder_GenericRemediation_ClusterScoped(t *testing.T) {
+	rb := NewRemediationBuilder("help@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("cluster-generic"),
+		Name:           "cluster-policy",
+		Namespace:      "", // cluster-scoped
+		ConstraintType: types.ConstraintTypeUnknown,
+		Source:         schema.GroupVersionResource{Resource: "customresources"},
+	}
+
+	result := rb.Build(c)
+	// Cluster-scoped should use cluster-admin privilege
+	assert.Equal(t, "kubectl", result.Steps[0].Type)
+	assert.Equal(t, "cluster-admin", result.Steps[0].RequiresPrivilege)
+	assert.NotContains(t, result.Steps[0].Command, "-n ")
+}
+
+func TestRemediationBuilder_NetworkPolicy_ClusterScoped(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("cluster-net"),
+		Name:           "cluster-netpol",
+		Namespace:      "", // cluster-scoped
+		ConstraintType: types.ConstraintTypeNetworkEgress,
+		Source:         schema.GroupVersionResource{Resource: "ciliumclusterwidenetworkpolicies"},
+	}
+
+	result := rb.Build(c)
+	// Cluster-scoped network policy should still have manual and link steps
+	// but no kubectl get with namespace
+	for _, step := range result.Steps {
+		if step.Type == "kubectl" {
+			assert.NotContains(t, step.Command, "-n ")
+		}
+	}
+}
+
+func TestRemediationBuilder_ResourceQuota_ClusterScoped(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("cluster-quota"),
+		Name:           "cluster-quota",
+		Namespace:      "", // cluster-scoped
+		ConstraintType: types.ConstraintTypeResourceLimit,
+		Source:         schema.GroupVersionResource{Resource: "limitranges"},
+	}
+
+	result := rb.Build(c)
+	// Cluster-scoped should still have manual and link steps
+	hasManual := false
+	hasLink := false
+	for _, step := range result.Steps {
+		if step.Type == "manual" {
+			hasManual = true
+		}
+		if step.Type == "link" {
+			hasLink = true
+		}
+	}
+	assert.True(t, hasManual)
+	assert.True(t, hasLink)
+}
+
+func TestRemediationBuilder_ResolveContact_EmptyContactInDetails(t *testing.T) {
+	rb := NewRemediationBuilder("default@example.com")
+
+	c := types.Constraint{
+		Details: map[string]interface{}{
+			"contact": "", // empty contact
+		},
+	}
+
+	// Empty contact in details should fall to default
+	result := rb.resolveContact(c)
+	assert.Equal(t, "default@example.com", result)
+}
+
 func TestIsSourceHelpers(t *testing.T) {
 	t.Run("isNetworkPolicySource", func(t *testing.T) {
 		assert.True(t, isNetworkPolicySource(types.Constraint{

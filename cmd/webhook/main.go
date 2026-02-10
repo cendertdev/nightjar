@@ -17,22 +17,24 @@ import (
 	"github.com/nightjarctl/nightjar/internal/webhook"
 )
 
-func main() {
-	var (
-		tlsCertFile    string
-		tlsKeyFile     string
-		addr           string
-		controllerURL  string
-		namespace      string
-		selfSignedMode bool
-	)
+// runConfig holds parsed configuration for the webhook.
+type runConfig struct {
+	TLSCertFile    string
+	TLSKeyFile     string
+	Addr           string
+	ControllerURL  string
+	Namespace      string
+	SelfSignedMode bool
+}
 
-	flag.StringVar(&tlsCertFile, "tls-cert-file", "", "Path to TLS certificate file (optional if using self-signed mode)")
-	flag.StringVar(&tlsKeyFile, "tls-key-file", "", "Path to TLS key file (optional if using self-signed mode)")
-	flag.StringVar(&addr, "addr", ":8443", "Address to listen on")
-	flag.StringVar(&controllerURL, "controller-url", "http://nightjar-controller.nightjar-system.svc:8080", "URL of the Nightjar controller API")
-	flag.StringVar(&namespace, "namespace", "nightjar-system", "Namespace where the webhook runs")
-	flag.BoolVar(&selfSignedMode, "self-signed", true, "Use self-signed certificate management")
+func main() {
+	cfg := runConfig{}
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "Path to TLS certificate file (optional if using self-signed mode)")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key-file", "", "Path to TLS key file (optional if using self-signed mode)")
+	flag.StringVar(&cfg.Addr, "addr", ":8443", "Address to listen on")
+	flag.StringVar(&cfg.ControllerURL, "controller-url", "http://nightjar-controller.nightjar-system.svc:8080", "URL of the Nightjar controller API")
+	flag.StringVar(&cfg.Namespace, "namespace", "nightjar-system", "Namespace where the webhook runs")
+	flag.BoolVar(&cfg.SelfSignedMode, "self-signed", true, "Use self-signed certificate management")
 	flag.Parse()
 
 	// Setup logger
@@ -45,12 +47,37 @@ func main() {
 	}
 	defer logger.Sync()
 
+	if err := run(cfg, logger); err != nil {
+		logger.Fatal("Server error", zap.Error(err))
+	}
+}
+
+// run contains the main application logic, separated from main() for testability.
+func run(cfg runConfig, logger *zap.Logger) error {
 	logger.Info("Starting Nightjar admission webhook",
-		zap.String("addr", addr),
-		zap.String("controller_url", controllerURL),
-		zap.Bool("self_signed", selfSignedMode),
+		zap.String("addr", cfg.Addr),
+		zap.String("controller_url", cfg.ControllerURL),
+		zap.Bool("self_signed", cfg.SelfSignedMode),
 	)
 
+	// Get Kubernetes config
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return fmt.Errorf("failed to get in-cluster config: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create Kubernetes client: %w", err)
+	}
+
+	return startServer(cfg, clientset, logger)
+}
+
+// startServer sets up the certificate manager, constraint client, admission
+// handler, and HTTPS server. It blocks until the context is cancelled or an
+// error occurs. Extracted from run() to allow testing with a fake clientset.
+func startServer(cfg runConfig, clientset kubernetes.Interface, logger *zap.Logger) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -63,25 +90,14 @@ func main() {
 		cancel()
 	}()
 
-	// Get Kubernetes config
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		logger.Fatal("Failed to get in-cluster config", zap.Error(err))
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		logger.Fatal("Failed to create Kubernetes client", zap.Error(err))
-	}
-
 	// Setup certificate management
 	var certManager *webhook.CertManager
-	if selfSignedMode {
-		certConfig := webhook.DefaultCertManagerConfig(namespace)
+	if cfg.SelfSignedMode {
+		certConfig := webhook.DefaultCertManagerConfig(cfg.Namespace)
 		certManager = webhook.NewCertManager(clientset, certConfig, logger)
 
 		if err := certManager.EnsureCertificates(ctx); err != nil {
-			logger.Fatal("Failed to ensure certificates", zap.Error(err))
+			return fmt.Errorf("failed to ensure certificates: %w", err)
 		}
 
 		// Update webhook configuration with CA bundle
@@ -95,23 +111,24 @@ func main() {
 	}
 
 	// Create constraint client
-	constraintClient := NewConstraintClient(controllerURL, logger)
+	constraintClient := NewConstraintClient(cfg.ControllerURL, logger)
 
 	// Create admission handler
 	handler := NewAdmissionHandler(constraintClient, logger)
 
 	// Create and start server
 	serverConfig := ServerConfig{
-		Addr:        addr,
-		TLSCertFile: tlsCertFile,
-		TLSKeyFile:  tlsKeyFile,
+		Addr:        cfg.Addr,
+		TLSCertFile: cfg.TLSCertFile,
+		TLSKeyFile:  cfg.TLSKeyFile,
 		CertManager: certManager,
 	}
 
 	server := NewServer(serverConfig, handler, logger)
 	if err := server.Start(ctx); err != nil {
-		logger.Fatal("Server error", zap.Error(err))
+		return err
 	}
 
 	logger.Info("Webhook server stopped")
+	return nil
 }

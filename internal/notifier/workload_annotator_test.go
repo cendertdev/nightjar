@@ -1,15 +1,23 @@
 package notifier
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/nightjarctl/nightjar/internal/annotations"
+	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -291,9 +299,386 @@ func TestJoinWithComma(t *testing.T) {
 	}
 }
 
+// --- New tests to boost coverage ---
+
+func TestWorkloadAnnotator_BuildAnnotationPatch_MixedSeveritiesWithoutCritical(t *testing.T) {
+	wa := &WorkloadAnnotator{}
+
+	constraints := []types.Constraint{
+		{
+			UID:            k8stypes.UID("uid-w1"),
+			Name:           "warn-1",
+			ConstraintType: types.ConstraintTypeNetworkIngress,
+			Severity:       types.SeverityWarning,
+			Source:         schema.GroupVersionResource{Resource: "networkpolicies"},
+		},
+		{
+			UID:            k8stypes.UID("uid-i1"),
+			Name:           "info-1",
+			ConstraintType: types.ConstraintTypeAdmission,
+			Severity:       types.SeverityInfo,
+			Source:         schema.GroupVersionResource{Resource: "validatingwebhookconfigurations"},
+		},
+	}
+
+	patch := wa.buildAnnotationPatch(constraints)
+	annots := patch["metadata"].(map[string]interface{})["annotations"].(map[string]interface{})
+
+	assert.Equal(t, "warning", annots[annotations.WorkloadMaxSeverity])
+	assert.Equal(t, "0", annots[annotations.WorkloadCriticalCount])
+	assert.Equal(t, "1", annots[annotations.WorkloadWarningCount])
+	assert.Equal(t, "1", annots[annotations.WorkloadInfoCount])
+}
+
+func TestWorkloadAnnotator_BuildStatusString_EdgeCases(t *testing.T) {
+	wa := &WorkloadAnnotator{}
+
+	// All types present
+	result := wa.buildStatusString(10, 3, 4)
+	assert.Equal(t, "10 constraints (3 critical, 4 warning)", result)
+
+	// Only info (no critical, no warning)
+	result = wa.buildStatusString(5, 0, 0)
+	assert.Equal(t, "5 constraints", result)
+
+	// Zero constraints
+	result = wa.buildStatusString(0, 0, 0)
+	assert.Equal(t, "No constraints", result)
+
+	// Only critical
+	result = wa.buildStatusString(1, 1, 0)
+	assert.Equal(t, "1 constraints (1 critical)", result)
+}
+
+func TestKindToGVR_AllSupported(t *testing.T) {
+	// Ensure all supported kinds are handled
+	supportedKinds := []string{"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob", "Pod"}
+
+	for _, kind := range supportedKinds {
+		t.Run(kind, func(t *testing.T) {
+			gvr, err := kindToGVR(kind)
+			assert.NoError(t, err)
+			assert.NotEmpty(t, gvr.Resource)
+		})
+	}
+}
+
+func TestKindToGVR_Unsupported(t *testing.T) {
+	_, err := kindToGVR("ConfigMap")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported workload kind")
+
+	_, err = kindToGVR("")
+	assert.Error(t, err)
+}
+
 func TestDefaultWorkloadAnnotatorOptions(t *testing.T) {
 	opts := DefaultWorkloadAnnotatorOptions()
 
 	assert.Equal(t, 30*1000*1000*1000, int(opts.DebounceDuration)) // 30 seconds in nanoseconds
 	assert.Equal(t, 5, opts.Workers)
+}
+
+func TestNewWorkloadAnnotator(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+	logger := zap.NewNop()
+	opts := DefaultWorkloadAnnotatorOptions()
+
+	wa := NewWorkloadAnnotator(dynClient, idx, logger, opts)
+
+	require.NotNil(t, wa)
+	assert.NotNil(t, wa.lastPatch)
+	assert.NotNil(t, wa.pending)
+	assert.NotNil(t, wa.workloads)
+	assert.Equal(t, 30*time.Second, wa.opts.DebounceDuration)
+	assert.Equal(t, 5, wa.opts.Workers)
+}
+
+func TestNewWorkloadAnnotator_ZeroOptions(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+	logger := zap.NewNop()
+
+	wa := NewWorkloadAnnotator(dynClient, idx, logger, WorkloadAnnotatorOptions{})
+
+	require.NotNil(t, wa)
+	assert.Equal(t, 30*time.Second, wa.opts.DebounceDuration)
+	assert.Equal(t, 5, wa.opts.Workers)
+}
+
+func TestWorkloadAnnotator_OnIndexChange(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+	logger := zap.NewNop()
+
+	wa := NewWorkloadAnnotator(dynClient, idx, logger, DefaultWorkloadAnnotatorOptions())
+
+	event := indexer.IndexEvent{
+		Type: "upsert",
+		Constraint: types.Constraint{
+			Name:               "test-policy",
+			Namespace:          "ns-a",
+			AffectedNamespaces: []string{"ns-a", "ns-b"},
+		},
+	}
+
+	wa.OnIndexChange(event)
+
+	// Should have queued updates for ns-a and ns-b
+	wa.mu.Lock()
+	assert.True(t, wa.workloads[workloadKey{Namespace: "ns-a"}])
+	assert.True(t, wa.workloads[workloadKey{Namespace: "ns-b"}])
+	wa.mu.Unlock()
+
+	// Should have items in the pending channel
+	assert.True(t, len(wa.pending) >= 2)
+}
+
+func TestWorkloadAnnotator_OnIndexChange_ClusterScoped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	event := indexer.IndexEvent{
+		Type: "upsert",
+		Constraint: types.Constraint{
+			Name:               "cluster-policy",
+			Namespace:          "", // cluster-scoped
+			AffectedNamespaces: []string{"team-a", "team-b", "team-c"},
+		},
+	}
+
+	wa.OnIndexChange(event)
+
+	wa.mu.Lock()
+	assert.True(t, wa.workloads[workloadKey{Namespace: "team-a"}])
+	assert.True(t, wa.workloads[workloadKey{Namespace: "team-b"}])
+	assert.True(t, wa.workloads[workloadKey{Namespace: "team-c"}])
+	wa.mu.Unlock()
+}
+
+func TestWorkloadAnnotator_QueueWorkloadUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	wa.QueueWorkloadUpdate("test-ns", "Deployment", "my-app")
+
+	// Should have an item in the pending channel
+	select {
+	case update := <-wa.pending:
+		assert.Equal(t, "test-ns", update.key.Namespace)
+		assert.Equal(t, "Deployment", update.key.Kind)
+		assert.Equal(t, "my-app", update.key.Name)
+	default:
+		t.Error("Expected pending update")
+	}
+}
+
+func TestWorkloadAnnotator_QueueWorkloadUpdate_Debounced(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	// Set last patch to recent
+	key := workloadKey{Namespace: "test-ns", Kind: "Deployment", Name: "my-app"}
+	wa.mu.Lock()
+	wa.lastPatch[key] = time.Now()
+	wa.mu.Unlock()
+
+	wa.QueueWorkloadUpdate("test-ns", "Deployment", "my-app")
+
+	// Should be debounced - nothing in the pending channel
+	select {
+	case <-wa.pending:
+		t.Error("Expected update to be debounced")
+	default:
+		// OK - debounced
+	}
+}
+
+func TestWorkloadAnnotator_Worker_ContextCancellation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		wa.worker(ctx, 0)
+		close(done)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+		// OK - worker exited
+	case <-time.After(2 * time.Second):
+		t.Error("Worker did not exit on context cancellation")
+	}
+}
+
+func TestWorkloadAnnotator_Worker_ChannelClose(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		wa.worker(ctx, 0)
+		close(done)
+	}()
+
+	// Close channel to signal worker to stop
+	close(wa.pending)
+
+	select {
+	case <-done:
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Error("Worker did not exit on channel close")
+	}
+}
+
+func TestWorkloadAnnotator_ProcessUpdate_NamespaceLevelSkipped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	// Namespace-level update (no Kind/Name) should be skipped
+	update := pendingUpdate{
+		key:       workloadKey{Namespace: "test-ns"},
+		scheduled: time.Now(),
+	}
+
+	// Should not panic
+	wa.processUpdate(context.Background(), update)
+}
+
+func TestWorkloadAnnotator_ProcessUpdate_WithWorkload(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "apps", Version: "v1", Resource: "deployments"}: "DeploymentList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+
+	// Create a deployment to patch
+	dep := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "my-app",
+				"namespace": "test-ns",
+			},
+		},
+	}
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	_, err := dynClient.Resource(gvr).Namespace("test-ns").Create(context.Background(), dep, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	idx := indexer.New(nil)
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), WorkloadAnnotatorOptions{
+		DebounceDuration: 1 * time.Millisecond,
+		Workers:          1,
+	})
+
+	update := pendingUpdate{
+		key:       workloadKey{Namespace: "test-ns", Kind: "Deployment", Name: "my-app"},
+		scheduled: time.Now(),
+	}
+
+	wa.processUpdate(context.Background(), update)
+
+	// Verify the workload was patched (annotations should be set to nil/removed since no constraints)
+	result, err := dynClient.Resource(gvr).Namespace("test-ns").Get(context.Background(), "my-app", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+}
+
+func TestWorkloadAnnotator_ProcessUpdate_Debounced(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	// Set recent last patch
+	key := workloadKey{Namespace: "test-ns", Kind: "Deployment", Name: "my-app"}
+	wa.mu.Lock()
+	wa.lastPatch[key] = time.Now()
+	wa.mu.Unlock()
+
+	update := pendingUpdate{
+		key:       key,
+		scheduled: time.Now(),
+	}
+
+	// Should skip due to debounce - no error, no panic
+	wa.processUpdate(context.Background(), update)
+}
+
+func TestWorkloadAnnotator_ApplyPatch_UnsupportedKind(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	key := workloadKey{Namespace: "test-ns", Kind: "ConfigMap", Name: "test"}
+	patch := map[string]interface{}{"metadata": map[string]interface{}{}}
+
+	err := wa.applyPatch(context.Background(), key, patch)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported workload kind")
+}
+
+func TestWorkloadAnnotator_Start_ContextCancellation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), WorkloadAnnotatorOptions{
+		DebounceDuration: 100 * time.Millisecond,
+		Workers:          1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- wa.Start(ctx)
+	}()
+
+	// Give workers time to start
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Error("Start did not exit on context cancellation")
+	}
 }

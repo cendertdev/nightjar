@@ -97,8 +97,16 @@ type StatusResult struct {
 	NamespaceCount     int                `json:"namespaceCount"`
 }
 
+// getClientFunc is the function used to create a Kubernetes dynamic client.
+// It can be overridden in tests to inject a fake client.
+var getClientFunc = defaultGetClient
+
 // getClient creates a Kubernetes dynamic client.
 func getClient() (dynamic.Interface, error) {
+	return getClientFunc()
+}
+
+func defaultGetClient() (dynamic.Interface, error) {
 	// Use in-cluster config or kubeconfig
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
