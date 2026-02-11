@@ -9,19 +9,19 @@ Nightjar is delivered in 7 phases. Each phase is independently useful — Phase 
 **Goal**: Project structure, CI pipeline, CRD schemas, RBAC, Helm chart skeleton.
 
 ### Deliverables
-- [ ] Go module with `controller-runtime` skeleton
-- [ ] CRD type definitions (`ConstraintProfile`, `NotificationPolicy`, `ConstraintReport`)
-- [ ] CRD manifests generated via `controller-gen`
-- [ ] RBAC ClusterRole and ServiceAccount
-- [ ] Helm chart with configurable values
-- [ ] Dockerfile (distroless base)
-- [ ] CI pipeline (GitHub Actions): lint, test, build, image push
-- [ ] Makefile with standard targets (`make build`, `make test`, `make manifests`, `make docker-build`)
-- [ ] Adapter interface definition
-- [ ] Core type definitions (`Constraint`, `ConstraintType`, `Severity`, etc.)
-- [ ] Leader election setup
-- [ ] Health/readiness probes (`/healthz`, `/readyz`)
-- [ ] Metrics endpoint (`/metrics`)
+- [x] Go module with `controller-runtime` skeleton
+- [x] CRD type definitions (`ConstraintProfile`, `NotificationPolicy`, `ConstraintReport`)
+- [x] CRD manifests generated via `controller-gen`
+- [x] RBAC ClusterRole and ServiceAccount
+- [x] Helm chart with configurable values
+- [x] Dockerfile (distroless base)
+- [x] CI pipeline (GitHub Actions): lint, test, build, image push
+- [x] Makefile with standard targets (`make build`, `make test`, `make manifests`, `make docker-build`)
+- [x] Adapter interface definition
+- [x] Core type definitions (`Constraint`, `ConstraintType`, `Severity`, etc.)
+- [x] Leader election setup
+- [x] Health/readiness probes (`/healthz`, `/readyz`)
+- [x] Metrics endpoint (`/metrics`)
 
 ### Key Decisions to Lock In
 - CRD API version: `v1alpha1`
@@ -44,22 +44,22 @@ Nightjar is delivered in 7 phases. Each phase is independently useful — Phase 
 **Goal**: Discover and index native Kubernetes constraint resources. Emit notifications.
 
 ### Deliverables
-- [ ] Discovery engine: scan `discovery.ServerPreferredResources()`, match against known GVRs + heuristics
-- [ ] Dynamic informer management: spin up/down informers for discovered GVRs
-- [ ] Periodic re-scan (every 5 min) for newly installed CRDs
-- [ ] **Adapter: NetworkPolicy** — parse `podSelector`, `ingress`, `egress`, `policyTypes`
-- [ ] **Adapter: ResourceQuota** — parse hard limits, current usage
-- [ ] **Adapter: LimitRange** — parse default/min/max for containers
-- [ ] **Adapter: ValidatingWebhookConfiguration** — parse `rules`, `namespaceSelector`, `failurePolicy`
-- [ ] **Adapter: MutatingWebhookConfiguration** — same as above
-- [ ] **Adapter: Generic** — fallback for unknown CRDs; extract `metadata`, any `selector` fields
-- [ ] Constraint indexer: in-memory index with namespace/label/type queries
-- [ ] Correlation engine: watch Warning events, match to indexed constraints
-- [ ] Notification via Kubernetes Events on affected workloads
-- [ ] `ConstraintReport` CRD: per-namespace summary, updated on constraint changes
-- [ ] Privacy scoping: developer vs. admin detail levels
-- [ ] Unit tests for all adapters (fixture YAML → expected `Constraint` output)
-- [ ] Integration tests with `envtest`
+- [x] Discovery engine: scan `discovery.ServerPreferredResources()`, match against known GVRs + heuristics
+- [x] Dynamic informer management: spin up/down informers for discovered GVRs
+- [x] Periodic re-scan (every 5 min) for newly installed CRDs
+- [x] **Adapter: NetworkPolicy** — parse `podSelector`, `ingress`, `egress`, `policyTypes`
+- [x] **Adapter: ResourceQuota** — parse hard limits, current usage
+- [x] **Adapter: LimitRange** — parse default/min/max for containers
+- [x] **Adapter: ValidatingWebhookConfiguration** — parse `rules`, `namespaceSelector`, `failurePolicy`
+- [x] **Adapter: MutatingWebhookConfiguration** — same as above
+- [x] **Adapter: Generic** — fallback for unknown CRDs; extract `metadata`, any `selector` fields
+- [x] Constraint indexer: in-memory index with namespace/label/type queries
+- [x] Correlation engine: watch Warning events, match to indexed constraints
+- [x] Notification via Kubernetes Events on affected workloads
+- [x] `ConstraintReport` CRD: per-namespace summary, updated on constraint changes
+- [x] Privacy scoping: developer vs. admin detail levels
+- [x] Unit tests for all adapters (fixture YAML → expected `Constraint` output)
+- [x] Integration tests with `envtest`
 
 ### Testing Strategy
 - Unit: adapter parse tests with fixture YAML files (20+ fixtures per adapter)
@@ -79,15 +79,15 @@ Nightjar is delivered in 7 phases. Each phase is independently useful — Phase 
 **Goal**: Deep Cilium policy parsing and real-time traffic drop detection.
 
 ### Deliverables
-- [ ] **Adapter: CiliumNetworkPolicy** — parse `endpointSelector`, `ingress`/`egress` rules, L3/L4/L7 policies, `toPorts`, `toCIDR`, `toEntities`, `toServices`, `toFQDNs`
-- [ ] **Adapter: CiliumClusterwideNetworkPolicy** — same, cluster-scoped
-- [ ] Hubble client: connect to Hubble Relay gRPC API
-- [ ] Flow stream subscription: filter for `verdict=DROPPED`
-- [ ] Flow-to-constraint correlation: match dropped flows to CiliumNetworkPolicy rules
-- [ ] Service map: maintain mapping of `service name → port` using Service/Endpoint objects
-- [ ] Semantic notifications: "Access to prometheus-server.monitoring:9090 blocked" not just "port 9090 blocked"
-- [ ] Hubble graceful degradation: continue without Hubble if Relay is unreachable
-- [ ] Helm values: `hubble.enabled`, `hubble.relayAddress`
+- [x] **Adapter: CiliumNetworkPolicy** — parse `endpointSelector`, `ingress`/`egress` rules, L3/L4/L7 policies, `toPorts`, `toCIDR`, `toEntities`, `toServices`, `toFQDNs`
+- [x] **Adapter: CiliumClusterwideNetworkPolicy** — same, cluster-scoped
+- [x] Hubble client: connect to Hubble Relay gRPC API
+- [x] Flow stream subscription: filter for `verdict=DROPPED`
+- [x] Flow-to-constraint correlation: match dropped flows to CiliumNetworkPolicy rules
+- [x] Service map: maintain mapping of `service name → port` using Service/Endpoint objects
+- [x] Semantic notifications: "Access to prometheus-server.monitoring:9090 blocked" not just "port 9090 blocked"
+- [x] Hubble graceful degradation: continue without Hubble if Relay is unreachable
+- [x] Helm values: `hubble.enabled`, `hubble.relayAddress`
 
 ### Testing Strategy
 - Unit: Cilium policy YAML fixtures → expected constraints
@@ -106,15 +106,15 @@ Nightjar is delivered in 7 phases. Each phase is independently useful — Phase 
 **Goal**: Support the two major policy engines and add deploy-time warnings.
 
 ### Deliverables
-- [ ] **Adapter: Gatekeeper Constraints** — discover all CRDs under `constraints.gatekeeper.sh`, parse `match` blocks (kinds, namespaces, labelSelector), extract `parameters` and `rego` for human-readable summaries
-- [ ] **Adapter: Kyverno ClusterPolicy/Policy** — parse `match`/`exclude`, `validate`/`mutate`/`generate` rules
-- [ ] Admission webhook deployment (separate Deployment, 2+ replicas)
-- [ ] Warning-mode webhook: return admission warnings (not rejections) for workloads matching known constraints
-- [ ] `failurePolicy: Ignore` — always fail-open
-- [ ] PodDisruptionBudget for webhook pods
-- [ ] Anti-affinity for webhook pod scheduling
-- [ ] Webhook certificate management (cert-manager or self-signed rotation)
-- [ ] Helm values: `admissionWebhook.enabled`, `admissionWebhook.replicas`, `admissionWebhook.failurePolicy`
+- [x] **Adapter: Gatekeeper Constraints** — discover all CRDs under `constraints.gatekeeper.sh`, parse `match` blocks (kinds, namespaces, labelSelector), extract `parameters` and `rego` for human-readable summaries
+- [x] **Adapter: Kyverno ClusterPolicy/Policy** — parse `match`/`exclude`, `validate`/`mutate`/`generate` rules
+- [x] Admission webhook deployment (separate Deployment, 2+ replicas)
+- [x] Warning-mode webhook: return admission warnings (not rejections) for workloads matching known constraints
+- [x] `failurePolicy: Ignore` — always fail-open
+- [x] PodDisruptionBudget for webhook pods
+- [x] Anti-affinity for webhook pod scheduling
+- [x] Webhook certificate management (cert-manager or self-signed rotation)
+- [x] Helm values: `admissionWebhook.enabled`, `admissionWebhook.replicas`, `admissionWebhook.failurePolicy`
 
 ### Testing Strategy
 - Unit: Gatekeeper constraint template + constraint fixtures → expected constraints
@@ -138,17 +138,17 @@ Nightjar is delivered in 7 phases. Each phase is independently useful — Phase 
 - [ ] **Adapter: Istio PeerAuthentication** — parse mTLS mode, selector, namespace scope
 - [ ] **Adapter: Istio AuthorizationPolicy** — parse source/operation rules
 - [ ] **Adapter: Istio Sidecar** — parse egress/ingress listeners, workloadSelector
-- [ ] Requirement evaluator engine with rule interface
-- [ ] Built-in requirement rules:
+- [x] Requirement evaluator engine with rule interface
+- [x] Built-in requirement rules:
   - Istio sidecar present → VirtualService/DestinationRule should exist
   - Port named "metrics"/"http-metrics" → ServiceMonitor/PodMonitor should exist
   - Namespace with istio-injection=enabled → PeerAuthentication should exist
   - cert-manager Certificate referenced → ClusterIssuer/Issuer should exist
 - [ ] Annotation-based requirements (`nightjar.io/requires`)
-- [ ] Debounce logic for missing-resource notifications (configurable, default 120s)
-- [ ] Detection of missing CRDs themselves ("Your manifest requires CRD X which isn't installed")
+- [x] Debounce logic for missing-resource notifications (configurable, default 120s)
+- [x] Detection of missing CRDs themselves ("Your manifest requires CRD X which isn't installed")
 - [ ] ArgoCD Application / Flux Kustomization health status monitoring (parse "no matches for kind" errors)
-- [ ] Helm values: `requirements.enabled`, `requirements.debounceSeconds`
+- [x] Helm values: `requirements.enabled`, `requirements.debounceSeconds`
 
 ### Testing Strategy
 - Unit: requirement rule fixtures (workload YAML + cluster state → expected requirements)
@@ -171,7 +171,7 @@ Nightjar is delivered in 7 phases. Each phase is independently useful — Phase 
 - [ ] Slack integration: webhook-based, configurable per severity and namespace
 - [ ] Microsoft Teams integration: similar to Slack
 - [ ] Generic webhook: HTTP POST with JSON payload for custom integrations
-- [ ] Notification deduplication: track notification state, only re-notify on change
+- [x] Notification deduplication: track notification state, only re-notify on change
 - [ ] Notification routing: map namespaces to notification channels via `NotificationPolicy` CRD
 - [ ] Grafana dashboard JSON (shipped with Helm chart)
 - [ ] Prometheus alerting rules (shipped with Helm chart)
