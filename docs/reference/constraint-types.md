@@ -249,9 +249,12 @@ Expected companion resources not found.
 A resource that should exist (based on annotations or conventions) is missing.
 
 ### Sources
-- Missing ServiceMonitor (for `prometheus.io/scrape` annotation)
-- Missing VirtualService (for Istio-enabled workloads)
-- Missing HorizontalPodAutoscaler (for high-traffic services)
+- Missing ServiceMonitor/PodMonitor (for workloads with a `metrics` or `http-metrics` port)
+- Missing VirtualService/DestinationRule (for workloads with Istio sidecar)
+- Missing PeerAuthentication (for namespaces with Istio injection enabled)
+- Missing ClusterIssuer/Issuer (for workloads with cert-manager annotations)
+
+See [Missing Resource Detection](/nightjar/controller/missing-resources/) for the full list of built-in rules and their detection logic.
 
 ### Effects
 - `missing` - Required resource doesn't exist
@@ -265,12 +268,12 @@ Traffic not being routed through mesh
 
 ### Example Constraint
 ```yaml
-name: missing-servicemonitor
+name: missing-prometheus-monitor-api-server
 type: MissingResource
 severity: Warning
 effect: missing
-summary: "No ServiceMonitor for workload with prometheus.io/scrape annotation"
-tags: [missing, prometheus, monitoring]
+summary: "Workload exposes a metrics port but has no ServiceMonitor or PodMonitor"
+tags: [prometheus, monitoring, missing-resource]
 ```
 
 ### Remediation Patterns

@@ -165,7 +165,7 @@ machineReadable:
   missingResources:
     - expectedKind: "ServiceMonitor"
       expectedAPIVersion: "monitoring.coreos.com/v1"
-      reason: "Workload has prometheus.io/scrape annotation"
+      reason: "Workload has a port named metrics or http-metrics but no Prometheus monitor targets it"
       severity: "Warning"
       forWorkload:
         kind: "Deployment"
@@ -260,9 +260,11 @@ machineReadable:
 | `expectedKind` | string | Kind that should exist |
 | `expectedAPIVersion` | string | API version |
 | `reason` | string | Why expected |
-| `severity` | enum | Warning, Info |
+| `severity` | enum | Warning, Critical |
 | `forWorkload` | WorkloadReference | Which workload needs it |
 | `remediation` | RemediationInfo | How to create it |
+
+See [Missing Resource Detection](/nightjar/controller/missing-resources/) for the full list of built-in detection rules.
 
 ---
 
