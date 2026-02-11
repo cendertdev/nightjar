@@ -172,10 +172,10 @@ Invoke-WebRequest -Uri https://github.com/cendertdev/nightjar/releases/latest/do
 Move-Item nightjar.exe C:\Windows\System32\
 ```
 
-**Verify checksum** (optional):
+**Verify checksum** (optional, replace platform suffix as needed):
 ```bash
-curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64.sha256
-sha256sum nightjar
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64.sha256 -o nightjar.sha256
+sha256sum -c nightjar.sha256
 ```
 
 ### Using Go
