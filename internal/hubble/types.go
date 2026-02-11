@@ -120,6 +120,11 @@ const (
 	DropReasonUnknown DropReason = "UNKNOWN"
 )
 
+// String returns the string representation of the drop reason.
+func (r DropReason) String() string {
+	return string(r)
+}
+
 // IsPolicyDrop returns true if the drop was caused by a policy.
 func (r DropReason) IsPolicyDrop() bool {
 	switch r {

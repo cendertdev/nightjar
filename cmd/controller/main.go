@@ -141,11 +141,14 @@ func main() {
 		rescanInterval,
 	)
 
+	// Setup signal handler context (before Hubble client so it responds to SIGTERM)
+	ctx := ctrl.SetupSignalHandler()
+
 	// Build Hubble client (optional)
 	var hubbleClient *hubble.Client
 	if hubbleEnabled {
 		var clientErr error
-		hubbleClient, clientErr = hubble.NewClient(context.Background(), hubble.ClientOptions{
+		hubbleClient, clientErr = hubble.NewClient(ctx, hubble.ClientOptions{
 			RelayAddress: hubbleAddr,
 			Logger:       logger,
 		})
@@ -193,9 +196,6 @@ func main() {
 		mgr.GetClient(), idx, logger, reconcilerOpts,
 		reconcilerEvaluator, dynamicClient,
 	)
-
-	// Setup signal handler context
-	ctx := ctrl.SetupSignalHandler()
 
 	// Add runnable to start discovery engine
 	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {

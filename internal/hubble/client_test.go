@@ -658,6 +658,49 @@ func TestClient_StreamFlows_ICMPv4Flow(t *testing.T) {
 	<-done
 }
 
+func TestClient_StreamFlows_ICMPv6Flow(t *testing.T) {
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				L4: &flowpb.Layer4{
+					Protocol: &flowpb.Layer4_ICMPv6{
+						ICMPv6: &flowpb.ICMPv6{Type: 128, Code: 0},
+					},
+				},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, ProtocolICMP, drop.L4.Protocol)
+		assert.Equal(t, uint32(0), drop.L4.SourcePort)
+		assert.Equal(t, uint32(0), drop.L4.DestinationPort)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	<-done
+}
+
 func TestClient_StreamFlows_UnknownL4Protocol(t *testing.T) {
 	srv := &mockObserverServer{
 		flows: []*flowpb.Flow{
