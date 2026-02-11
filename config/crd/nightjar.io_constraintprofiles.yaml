@@ -56,6 +56,33 @@ spec:
                 default: true
                 description: Enabled controls whether this resource type is watched.
                 type: boolean
+              fieldPaths:
+                description: |-
+                  FieldPaths configures custom extraction paths for the generic adapter.
+                  Only used when Adapter is "generic". Each path is dot-delimited
+                  (e.g., "spec.workloadSelector").
+                properties:
+                  effectPath:
+                    description: |-
+                      EffectPath is the path to the effect/action field.
+                      Example: "spec.action"
+                    type: string
+                  namespaceSelectorPath:
+                    description: |-
+                      NamespaceSelectorPath is the path to the namespace label selector.
+                      Example: "spec.namespaceSelector"
+                    type: string
+                  selectorPath:
+                    description: |-
+                      SelectorPath is the path to the workload label selector.
+                      Example: "spec.workloadSelector"
+                    type: string
+                  summaryPath:
+                    description: |-
+                      SummaryPath is the path to a human-readable description.
+                      Example: "spec.description"
+                    type: string
+                type: object
               gvr:
                 description: GVR identifies the target resource type.
                 properties:

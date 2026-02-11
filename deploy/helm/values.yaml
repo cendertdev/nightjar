@@ -93,6 +93,15 @@ adapters:
   prometheus:
     enabled: auto
 
+# -- Discovery tuning
+discovery:
+  # -- Additional API groups to treat as policy sources (beyond built-in groups)
+  additionalPolicyGroups: []
+  # -- Additional resource name substrings for heuristic policy detection
+  additionalPolicyNameHints: []
+  # -- Check CRDs for nightjar.io/is-policy annotation during discovery scan
+  checkCRDAnnotations: true
+
 # -- Hubble integration (requires Cilium with Hubble enabled)
 hubble:
   enabled: false

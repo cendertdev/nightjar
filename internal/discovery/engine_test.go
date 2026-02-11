@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
+	v1alpha1 "github.com/nightjarctl/nightjar/api/v1alpha1"
 	"github.com/nightjarctl/nightjar/internal/adapters"
 	"github.com/nightjarctl/nightjar/internal/adapters/networkpolicy"
 	"github.com/nightjarctl/nightjar/internal/indexer"
@@ -314,6 +315,7 @@ func TestHandleAdd(t *testing.T) {
 	ctx := context.Background()
 
 	gvr := schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
+	engine.watchedGVRs[gvr] = true
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -357,6 +359,7 @@ func TestHandleUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	gvr := schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
+	engine.watchedGVRs[gvr] = true
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -844,4 +847,314 @@ func TestParseObject_GroupBasedMatching(t *testing.T) {
 	require.Len(t, constraints, 1)
 	assert.Equal(t, "test-thing", constraints[0].Name)
 	assert.Equal(t, internaltypes.ConstraintTypeUnknown, constraints[0].ConstraintType)
+}
+
+// --- Phase 6: ConstraintProfile and annotation tests ---
+
+func TestRegisterProfile_StartsInformer(t *testing.T) {
+	idx := indexer.New(nil)
+	registry := adapters.NewRegistry()
+
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "custom.io", Version: "v1", Resource: "restrictions"}: "RestrictionList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+
+	engine := NewEngine(zap.NewNop(), nil, dynClient, registry, idx, 5*time.Minute)
+
+	profile := &v1alpha1.ConstraintProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-profile"},
+		Spec: v1alpha1.ConstraintProfileSpec{
+			GVR:     v1alpha1.GVRReference{Group: "custom.io", Version: "v1", Resource: "restrictions"},
+			Adapter: "generic",
+			Enabled: true,
+		},
+	}
+
+	err := engine.RegisterProfile(profile)
+	require.NoError(t, err)
+
+	// GVR should now be watched
+	gvrs := engine.WatchedGVRs()
+	require.Len(t, gvrs, 1)
+	assert.Equal(t, "custom.io", gvrs[0].Group)
+	assert.Equal(t, "restrictions", gvrs[0].Resource)
+
+	engine.Stop()
+}
+
+func TestUnregisterProfile_CleansUpConstraints(t *testing.T) {
+	idx := indexer.New(nil)
+	registry := adapters.NewRegistry()
+
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "custom.io", Version: "v1", Resource: "restrictions"}: "RestrictionList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+
+	engine := NewEngine(zap.NewNop(), nil, dynClient, registry, idx, 5*time.Minute)
+
+	profile := &v1alpha1.ConstraintProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-profile"},
+		Spec: v1alpha1.ConstraintProfileSpec{
+			GVR:     v1alpha1.GVRReference{Group: "custom.io", Version: "v1", Resource: "restrictions"},
+			Adapter: "generic",
+			Enabled: true,
+		},
+	}
+
+	require.NoError(t, engine.RegisterProfile(profile))
+
+	// Simulate some constraints being indexed for this GVR
+	gvr := schema.GroupVersionResource{Group: "custom.io", Version: "v1", Resource: "restrictions"}
+	idx.Upsert(internaltypes.Constraint{
+		UID:    "uid-1",
+		Source: gvr,
+		Name:   "constraint-1",
+	})
+	idx.Upsert(internaltypes.Constraint{
+		UID:    "uid-2",
+		Source: gvr,
+		Name:   "constraint-2",
+	})
+	assert.Equal(t, 2, idx.Count())
+
+	engine.UnregisterProfile("cleanup-profile")
+
+	// Constraints should be cleaned up
+	assert.Equal(t, 0, idx.Count())
+	// GVR should no longer be watched
+	assert.Empty(t, engine.WatchedGVRs())
+
+	engine.Stop()
+}
+
+func TestRegisterProfile_DisabledSuppressesGVR(t *testing.T) {
+	idx := indexer.New(nil)
+	registry := adapters.NewRegistry()
+
+	engine := NewEngine(zap.NewNop(), nil, nil, registry, idx, 5*time.Minute)
+
+	profile := &v1alpha1.ConstraintProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "disabled-profile"},
+		Spec: v1alpha1.ConstraintProfileSpec{
+			GVR:     v1alpha1.GVRReference{Group: "custom.io", Version: "v1", Resource: "stuff"},
+			Adapter: "generic",
+			Enabled: false,
+		},
+	}
+
+	err := engine.RegisterProfile(profile)
+	require.NoError(t, err)
+
+	// Should NOT start an informer for disabled profile
+	assert.Empty(t, engine.WatchedGVRs())
+
+	engine.Stop()
+}
+
+func TestIsConstraintLike_WithProfile(t *testing.T) {
+	engine, _ := setupTestEngine(t)
+
+	customGVR := schema.GroupVersionResource{Group: "custom.corp.io", Version: "v1", Resource: "widgetpolicies"}
+
+	// Before profile: not recognized (custom.corp.io is not a known policy group, "widgetpolicies" matches "policies" heuristic though)
+	// Let's use something that does NOT match heuristics
+	oddGVR := schema.GroupVersionResource{Group: "odd.corp.io", Version: "v1", Resource: "foobar"}
+	assert.False(t, engine.isConstraintLike(oddGVR, "foobar"))
+
+	// Register profile
+	engine.mu.Lock()
+	engine.profiles["test"] = &profileState{
+		gvr:     oddGVR,
+		enabled: true,
+	}
+	engine.mu.Unlock()
+
+	assert.True(t, engine.isConstraintLike(oddGVR, "foobar"))
+
+	// Disabled profile should not match
+	engine.mu.Lock()
+	engine.profiles["test"].enabled = false
+	engine.mu.Unlock()
+
+	assert.False(t, engine.isConstraintLike(oddGVR, "foobar"))
+
+	_ = customGVR // avoid unused
+}
+
+func TestIsConstraintLike_WithAnnotatedCRD(t *testing.T) {
+	engine, _ := setupTestEngine(t)
+
+	annotatedGVR := schema.GroupVersionResource{Group: "custom.io", Version: "v1", Resource: "widgets"}
+	assert.False(t, engine.isConstraintLike(annotatedGVR, "widgets"))
+
+	// Simulate annotated CRD cache
+	engine.mu.Lock()
+	engine.annotatedCRDs[annotatedGVR] = true
+	engine.mu.Unlock()
+
+	assert.True(t, engine.isConstraintLike(annotatedGVR, "widgets"))
+}
+
+func TestSetAdditionalGroups(t *testing.T) {
+	engine, _ := setupTestEngine(t)
+
+	customGVR := schema.GroupVersionResource{Group: "custom.corp.io", Version: "v1", Resource: "widgets"}
+	assert.False(t, engine.isConstraintLike(customGVR, "widgets"))
+
+	engine.SetAdditionalGroups([]string{"custom.corp.io"})
+	assert.True(t, engine.isConstraintLike(customGVR, "widgets"))
+}
+
+func TestSetAdditionalHints(t *testing.T) {
+	engine, _ := setupTestEngine(t)
+
+	gvr := schema.GroupVersionResource{Group: "test.io", Version: "v1", Resource: "guardrails"}
+	assert.False(t, engine.isConstraintLike(gvr, "guardrails"))
+
+	engine.SetAdditionalHints([]string{"guardrail"})
+	assert.True(t, engine.isConstraintLike(gvr, "guardrails"))
+}
+
+func TestParseObject_WithProfileConfig(t *testing.T) {
+	idx := indexer.New(nil)
+	registry := adapters.NewRegistry()
+
+	engine := NewEngine(zap.NewNop(), nil, nil, registry, idx, 5*time.Minute)
+
+	gvr := schema.GroupVersionResource{Group: "custom.io", Version: "v1", Resource: "deployrestrictions"}
+
+	// Register a profile with field paths and severity override
+	engine.mu.Lock()
+	engine.profiles["deploy-profile"] = &profileState{
+		gvr:     gvr,
+		adapter: "generic",
+		enabled: true,
+		fieldPaths: &v1alpha1.FieldPaths{
+			EffectPath: "spec.action",
+		},
+		severity: "Critical",
+	}
+	engine.mu.Unlock()
+
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "custom.io/v1",
+			"kind":       "DeployRestriction",
+			"metadata": map[string]interface{}{
+				"name":      "test-restrict",
+				"namespace": "prod",
+				"uid":       "uid-profile-test",
+			},
+			"spec": map[string]interface{}{
+				"action": "deny",
+			},
+		},
+	}
+
+	constraints, err := engine.parseObject(context.Background(), gvr, obj)
+	require.NoError(t, err)
+	require.Len(t, constraints, 1)
+
+	c := constraints[0]
+	assert.Equal(t, "deny", c.Effect)
+	assert.Equal(t, internaltypes.SeverityCritical, c.Severity)
+}
+
+func TestRefreshAnnotatedCRDs(t *testing.T) {
+	idx := indexer.New(nil)
+	registry := adapters.NewRegistry()
+
+	crdGVR := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		crdGVR: "CustomResourceDefinitionList",
+	}
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+		&unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata": map[string]interface{}{
+					"name": "widgets.custom.io",
+					"annotations": map[string]interface{}{
+						"nightjar.io/is-policy": "true",
+					},
+				},
+				"spec": map[string]interface{}{
+					"group": "custom.io",
+					"names": map[string]interface{}{
+						"plural": "widgets",
+					},
+					"versions": []interface{}{
+						map[string]interface{}{
+							"name":    "v1",
+							"served":  true,
+							"storage": true,
+						},
+					},
+				},
+			},
+		},
+		&unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata": map[string]interface{}{
+					"name": "things.other.io",
+					// No is-policy annotation
+				},
+				"spec": map[string]interface{}{
+					"group": "other.io",
+					"names": map[string]interface{}{
+						"plural": "things",
+					},
+					"versions": []interface{}{
+						map[string]interface{}{
+							"name":    "v1",
+							"served":  true,
+							"storage": true,
+						},
+					},
+				},
+			},
+		},
+	)
+
+	engine := NewEngine(zap.NewNop(), nil, dynClient, registry, idx, 5*time.Minute)
+	engine.refreshAnnotatedCRDs(context.Background())
+
+	widgetGVR := schema.GroupVersionResource{Group: "custom.io", Version: "v1", Resource: "widgets"}
+	thingGVR := schema.GroupVersionResource{Group: "other.io", Version: "v1", Resource: "things"}
+
+	engine.mu.RLock()
+	assert.True(t, engine.annotatedCRDs[widgetGVR], "annotated CRD should be detected")
+	assert.False(t, engine.annotatedCRDs[thingGVR], "non-annotated CRD should not be detected")
+	engine.mu.RUnlock()
+
+	// isConstraintLike should recognize the annotated GVR
+	assert.True(t, engine.isConstraintLike(widgetGVR, "widgets"))
+}
+
+func TestDeleteBySource(t *testing.T) {
+	idx := indexer.New(nil)
+	gvr1 := schema.GroupVersionResource{Group: "a.io", Version: "v1", Resource: "foos"}
+	gvr2 := schema.GroupVersionResource{Group: "b.io", Version: "v1", Resource: "bars"}
+
+	idx.Upsert(internaltypes.Constraint{UID: "1", Source: gvr1, Name: "foo-1"})
+	idx.Upsert(internaltypes.Constraint{UID: "2", Source: gvr1, Name: "foo-2"})
+	idx.Upsert(internaltypes.Constraint{UID: "3", Source: gvr2, Name: "bar-1"})
+
+	assert.Equal(t, 3, idx.Count())
+
+	n := idx.DeleteBySource(gvr1)
+	assert.Equal(t, 2, n)
+	assert.Equal(t, 1, idx.Count())
+
+	remaining := idx.All()
+	require.Len(t, remaining, 1)
+	assert.Equal(t, "bar-1", remaining[0].Name)
 }

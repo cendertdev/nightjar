@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -14,15 +15,16 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 
+	v1alpha1 "github.com/nightjarctl/nightjar/api/v1alpha1"
 	"github.com/nightjarctl/nightjar/internal/adapters"
 	"github.com/nightjarctl/nightjar/internal/adapters/generic"
 	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
-// Known policy-related API groups. Resources in these groups are always treated
-// as constraint-like, regardless of heuristic matching.
-var knownPolicyGroups = map[string]bool{
+// defaultPolicyGroups are the built-in policy-related API groups.
+// Resources in these groups are always treated as constraint-like.
+var defaultPolicyGroups = map[string]bool{
 	"networking.k8s.io":            true,
 	"cilium.io":                    true,
 	"constraints.gatekeeper.sh":    true,
@@ -33,14 +35,27 @@ var knownPolicyGroups = map[string]bool{
 	"policy":                       true, // PodSecurityPolicy (deprecated but may exist)
 }
 
-// Heuristic substrings in resource names that suggest a constraint-like resource.
-var policyNameHints = []string{
+// defaultPolicyNameHints are the built-in heuristic substrings.
+var defaultPolicyNameHints = []string{
 	"policy", "policies",
 	"constraint", "constraints",
 	"rule", "rules",
 	"quota", "quotas",
 	"limit", "limits",
 	"authorization",
+}
+
+// IsPolicyAnnotation is the CRD annotation that marks a CRD as a policy source.
+const IsPolicyAnnotation = "nightjar.io/is-policy"
+
+// profileState holds the runtime configuration for a single ConstraintProfile.
+type profileState struct {
+	gvr        schema.GroupVersionResource
+	adapter    string
+	fieldPaths *v1alpha1.FieldPaths
+	severity   string
+	enabled    bool
+	stopCh     chan struct{} // per-profile stop channel for informer lifecycle
 }
 
 // Engine discovers constraint-like resources in the cluster and manages
@@ -60,6 +75,15 @@ type Engine struct {
 	informers       map[schema.GroupVersionResource]cache.SharedIndexInformer
 
 	rescanInterval time.Duration
+
+	// Configurable heuristics (initialized from defaults, augmented by config).
+	policyGroups map[string]bool
+	nameHints    []string
+
+	// ConstraintProfile state (protected by mu).
+	profiles        map[string]*profileState
+	annotatedCRDs   map[schema.GroupVersionResource]bool // cached CRD annotation results
+	checkAnnotation bool                                 // whether to check CRD annotations during scan
 }
 
 // NewEngine creates a new discovery engine.
@@ -71,6 +95,14 @@ func NewEngine(
 	idx *indexer.Indexer,
 	rescanInterval time.Duration,
 ) *Engine {
+	// Copy defaults so modifications don't affect the package-level vars.
+	groups := make(map[string]bool, len(defaultPolicyGroups))
+	for k, v := range defaultPolicyGroups {
+		groups[k] = v
+	}
+	hints := make([]string, len(defaultPolicyNameHints))
+	copy(hints, defaultPolicyNameHints)
+
 	return &Engine{
 		logger:          logger.Named("discovery"),
 		discoveryClient: discoveryClient,
@@ -82,7 +114,35 @@ func NewEngine(
 		informers:       make(map[schema.GroupVersionResource]cache.SharedIndexInformer),
 		stopCh:          make(chan struct{}),
 		rescanInterval:  rescanInterval,
+		policyGroups:    groups,
+		nameHints:       hints,
+		profiles:        make(map[string]*profileState),
+		annotatedCRDs:   make(map[schema.GroupVersionResource]bool),
+		checkAnnotation: true,
 	}
+}
+
+// SetAdditionalGroups adds extra API groups to the policy detection heuristic.
+func (e *Engine) SetAdditionalGroups(groups []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, g := range groups {
+		e.policyGroups[g] = true
+	}
+}
+
+// SetAdditionalHints adds extra name hints to the policy detection heuristic.
+func (e *Engine) SetAdditionalHints(hints []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.nameHints = append(e.nameHints, hints...)
+}
+
+// SetCheckAnnotation controls whether the engine checks CRD annotations during scan.
+func (e *Engine) SetCheckAnnotation(enabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.checkAnnotation = enabled
 }
 
 // Start begins the discovery loop. It performs an initial scan, then
@@ -151,15 +211,36 @@ func (e *Engine) scan(ctx context.Context) error {
 		}
 	}
 
+	// Check CRD annotations if enabled
+	e.mu.RLock()
+	checkAnnotation := e.checkAnnotation
+	e.mu.RUnlock()
+	if checkAnnotation {
+		e.refreshAnnotatedCRDs(ctx)
+	}
+
 	e.logger.Info("Discovery scan complete",
 		zap.Int("discovered", len(discovered)),
 		zap.Int("previously_watched", len(e.watchedGVRs)),
 	)
 
+	// Also include profile-suppressed GVRs: profiles with enabled=false exclude from discovery
+	e.mu.RLock()
+	suppressed := make(map[schema.GroupVersionResource]bool)
+	for _, ps := range e.profiles {
+		if !ps.enabled {
+			suppressed[ps.gvr] = true
+		}
+	}
+	e.mu.RUnlock()
+
 	// Start informers for newly discovered GVRs
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, gvr := range discovered {
+		if suppressed[gvr] {
+			continue
+		}
 		if !e.watchedGVRs[gvr] {
 			e.logger.Info("New constraint-like resource discovered",
 				zap.String("group", gvr.Group),
@@ -216,6 +297,14 @@ func (e *Engine) startInformer(ctx context.Context, gvr schema.GroupVersionResou
 
 // handleAdd processes a new object.
 func (e *Engine) handleAdd(ctx context.Context, gvr schema.GroupVersionResource, obj interface{}) {
+	// Skip if GVR has been suppressed (e.g., disabled by a ConstraintProfile)
+	e.mu.RLock()
+	watched := e.watchedGVRs[gvr]
+	e.mu.RUnlock()
+	if !watched {
+		return
+	}
+
 	unstructuredObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		e.logger.Warn("Unexpected object type in AddFunc")
@@ -265,6 +354,25 @@ func (e *Engine) handleDelete(gvr schema.GroupVersionResource, obj interface{}) 
 
 // parseObject routes the object to the appropriate adapter.
 func (e *Engine) parseObject(ctx context.Context, gvr schema.GroupVersionResource, obj *unstructured.Unstructured) ([]types.Constraint, error) {
+	// Check if a ConstraintProfile provides config for this GVR
+	e.mu.RLock()
+	var profileCfg *profileState
+	for _, ps := range e.profiles {
+		if ps.enabled && ps.gvr == gvr {
+			profileCfg = ps
+			break
+		}
+	}
+	e.mu.RUnlock()
+
+	// If profile specifies a named adapter, try it
+	if profileCfg != nil && profileCfg.adapter != "" && profileCfg.adapter != "generic" {
+		adapter := e.registry.ForName(profileCfg.adapter)
+		if adapter != nil {
+			return adapter.Parse(ctx, obj)
+		}
+	}
+
 	// Try specific GVR adapter first
 	adapter := e.registry.ForGVR(gvr)
 	if adapter != nil {
@@ -277,14 +385,27 @@ func (e *Engine) parseObject(ctx context.Context, gvr schema.GroupVersionResourc
 		return adapter.Parse(ctx, obj)
 	}
 
-	// Fall back to generic adapter
+	// Fall back to generic adapter — with profile config if available
+	if profileCfg != nil {
+		cfg := generic.ParseConfig{
+			FieldPaths:       profileCfg.fieldPaths,
+			SeverityOverride: profileCfg.severity,
+		}
+		return e.genericAdapter.ParseWithConfig(ctx, obj, gvr, cfg)
+	}
 	return e.genericAdapter.ParseWithGVR(ctx, obj, gvr)
 }
 
 // isConstraintLike determines whether a GVR is likely a constraint/policy resource.
+// Caller must NOT hold e.mu — this method acquires a read lock.
 func (e *Engine) isConstraintLike(gvr schema.GroupVersionResource, resourceName string) bool {
+	e.mu.RLock()
+	groups := e.policyGroups
+	hints := e.nameHints
+	e.mu.RUnlock()
+
 	// Check 1: Is this a known policy group?
-	if knownPolicyGroups[gvr.Group] {
+	if groups[gvr.Group] {
 		return true
 	}
 
@@ -303,19 +424,27 @@ func (e *Engine) isConstraintLike(gvr schema.GroupVersionResource, resourceName 
 
 	// Check 4: Heuristic — resource name contains policy-related substrings
 	lower := strings.ToLower(resourceName)
-	for _, hint := range policyNameHints {
+	for _, hint := range hints {
 		if strings.Contains(lower, hint) {
 			return true
 		}
 	}
 
 	// Check 5: ConstraintProfile CRDs that register additional types
-	// TODO: Check ConstraintProfile CRD instances
+	e.mu.RLock()
+	for _, ps := range e.profiles {
+		if ps.enabled && ps.gvr == gvr {
+			e.mu.RUnlock()
+			return true
+		}
+	}
+	e.mu.RUnlock()
 
 	// Check 6: CRD annotation override
-	// TODO: Check for nightjar.io/is-policy annotation on CRD
-
-	return false
+	e.mu.RLock()
+	annotated := e.annotatedCRDs[gvr]
+	e.mu.RUnlock()
+	return annotated
 }
 
 // WatchedGVRs returns the set of GVRs currently being watched.
@@ -330,8 +459,244 @@ func (e *Engine) WatchedGVRs() []schema.GroupVersionResource {
 	return result
 }
 
+// RegisterProfile registers a ConstraintProfile, starting an informer for its
+// GVR if enabled. Safe to call multiple times for the same profile (updates in place).
+func (e *Engine) RegisterProfile(profile *v1alpha1.ConstraintProfile) error {
+	name := profile.Name
+	spec := profile.Spec
+	gvr := schema.GroupVersionResource{
+		Group:    spec.GVR.Group,
+		Version:  spec.GVR.Version,
+		Resource: spec.GVR.Resource,
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// If profile already exists, stop its old informer first
+	if existing, ok := e.profiles[name]; ok {
+		if existing.gvr != gvr || !spec.Enabled {
+			e.stopProfileInformerLocked(existing)
+		}
+	}
+
+	ps := &profileState{
+		gvr:        gvr,
+		adapter:    spec.Adapter,
+		fieldPaths: spec.FieldPaths,
+		severity:   spec.Severity,
+		enabled:    spec.Enabled,
+	}
+	e.profiles[name] = ps
+
+	if !spec.Enabled {
+		// If explicitly disabled, stop any existing informer for this GVR
+		// and clean up constraints
+		e.stopGVRInformerLocked(gvr)
+		return nil
+	}
+
+	// Start informer if not already watching this GVR
+	if !e.watchedGVRs[gvr] {
+		e.watchedGVRs[gvr] = true
+		stopCh := make(chan struct{})
+		ps.stopCh = stopCh
+		e.startProfileInformer(gvr, stopCh)
+		e.logger.Info("ConstraintProfile registered, started informer",
+			zap.String("profile", name),
+			zap.String("gvr", gvr.String()),
+		)
+	} else {
+		e.logger.Info("ConstraintProfile registered, GVR already watched",
+			zap.String("profile", name),
+			zap.String("gvr", gvr.String()),
+		)
+	}
+
+	return nil
+}
+
+// UnregisterProfile removes a ConstraintProfile and cleans up its resources.
+func (e *Engine) UnregisterProfile(name string) {
+	e.mu.Lock()
+
+	ps, ok := e.profiles[name]
+	if !ok {
+		e.mu.Unlock()
+		return
+	}
+
+	gvr := ps.gvr
+	e.stopProfileInformerLocked(ps)
+	delete(e.profiles, name)
+
+	// Check if any other profile still needs this GVR
+	needed := false
+	for _, other := range e.profiles {
+		if other.enabled && other.gvr == gvr {
+			needed = true
+			break
+		}
+	}
+
+	if !needed {
+		e.stopGVRInformerLocked(gvr)
+	}
+
+	e.mu.Unlock()
+
+	// Clean up constraints outside the lock (indexer has its own lock)
+	if !needed {
+		n := e.indexer.DeleteBySource(gvr)
+		e.logger.Info("ConstraintProfile unregistered, cleaned up constraints",
+			zap.String("profile", name),
+			zap.String("gvr", gvr.String()),
+			zap.Int("removed", n),
+		)
+	} else {
+		e.logger.Info("ConstraintProfile unregistered, GVR still needed by other profile",
+			zap.String("profile", name),
+			zap.String("gvr", gvr.String()),
+		)
+	}
+}
+
+// stopProfileInformerLocked closes a profile's stop channel. Caller must hold e.mu.
+func (e *Engine) stopProfileInformerLocked(ps *profileState) {
+	if ps.stopCh != nil {
+		close(ps.stopCh)
+		ps.stopCh = nil
+	}
+}
+
+// stopGVRInformerLocked removes a GVR from the watched set and deletes its informer
+// reference. Caller must hold e.mu.
+func (e *Engine) stopGVRInformerLocked(gvr schema.GroupVersionResource) {
+	delete(e.watchedGVRs, gvr)
+	delete(e.informers, gvr)
+}
+
+// startProfileInformer creates and starts a dynamic informer with a profile-specific
+// stop channel, allowing it to be stopped independently.
+func (e *Engine) startProfileInformer(gvr schema.GroupVersionResource, stopCh chan struct{}) {
+	if e.dynamicClient == nil {
+		e.logger.Debug("Skipping profile informer start: no dynamic client", zap.String("gvr", gvr.String()))
+		return
+	}
+
+	// Use a dedicated factory so the informer can be stopped independently.
+	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+		e.dynamicClient,
+		30*time.Minute, // resync period
+		"",             // all namespaces
+		nil,            // no tweaks
+	)
+
+	informer := factory.ForResource(gvr).Informer()
+
+	ctx := context.Background()
+	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			e.handleAdd(ctx, gvr, obj)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			e.handleUpdate(ctx, gvr, newObj)
+		},
+		DeleteFunc: func(obj interface{}) {
+			e.handleDelete(gvr, obj)
+		},
+	}); err != nil {
+		e.logger.Error("Failed to add event handler for profile informer",
+			zap.String("gvr", gvr.String()), zap.Error(err))
+		return
+	}
+
+	e.informers[gvr] = informer
+	go informer.Run(stopCh)
+}
+
+// refreshAnnotatedCRDs lists all CRDs and caches which ones have the
+// nightjar.io/is-policy: "true" annotation.
+func (e *Engine) refreshAnnotatedCRDs(ctx context.Context) {
+	if e.dynamicClient == nil {
+		return
+	}
+
+	// Recover from panics — the fake dynamic client in tests panics when
+	// the CRD resource is not registered instead of returning an error.
+	defer func() {
+		if r := recover(); r != nil {
+			e.logger.Debug("CRD annotation check unavailable", zap.Any("recovered", r))
+		}
+	}()
+
+	crdGVR := schema.GroupVersionResource{
+		Group:    "apiextensions.k8s.io",
+		Version:  "v1",
+		Resource: "customresourcedefinitions",
+	}
+
+	list, err := e.dynamicClient.Resource(crdGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		e.logger.Debug("Failed to list CRDs for annotation check", zap.Error(err))
+		return
+	}
+
+	annotated := make(map[schema.GroupVersionResource]bool)
+	for i := range list.Items {
+		crd := &list.Items[i]
+		ann := crd.GetAnnotations()
+		if ann == nil || ann[IsPolicyAnnotation] != "true" {
+			continue
+		}
+
+		// Extract GVR from the CRD spec
+		spec, ok := crd.Object["spec"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		group, _ := spec["group"].(string)
+		names, ok := spec["names"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		plural, _ := names["plural"].(string)
+		if group == "" || plural == "" {
+			continue
+		}
+
+		// Use the first served version
+		versions, ok := spec["versions"].([]interface{})
+		if !ok || len(versions) == 0 {
+			continue
+		}
+		firstVer, ok := versions[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		version, _ := firstVer["name"].(string)
+		if version == "" {
+			continue
+		}
+
+		gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: plural}
+		annotated[gvr] = true
+	}
+
+	e.mu.Lock()
+	e.annotatedCRDs = annotated
+	e.mu.Unlock()
+}
+
 // Stop stops all informers and the discovery engine.
 func (e *Engine) Stop() {
 	e.logger.Info("Stopping discovery engine")
 	close(e.stopCh)
+
+	// Also stop profile-managed informers
+	e.mu.Lock()
+	for _, ps := range e.profiles {
+		e.stopProfileInformerLocked(ps)
+	}
+	e.mu.Unlock()
 }

@@ -95,6 +95,86 @@ func (r *Registry) HandledGVRs() []schema.GroupVersionResource {
 	return result
 }
 
+// Unregister removes an adapter by name, including all its GVR mappings
+// (both from Handles() and any added dynamically via RegisterGVR).
+// Returns an error if the adapter is not found.
+func (r *Registry) Unregister(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.adapters[name]; !exists {
+		return fmt.Errorf("adapter %q not registered", name)
+	}
+
+	// Remove all GVR mappings that point to this adapter,
+	// including those added dynamically via RegisterGVR.
+	affectedGroups := map[string]bool{}
+	for gvr, a := range r.gvrMap {
+		if a.Name() == name {
+			delete(r.gvrMap, gvr)
+			affectedGroups[gvr.Group] = true
+		}
+	}
+
+	// Clean up groupMap for affected groups, reassigning if another adapter remains.
+	for group := range affectedGroups {
+		if g, ok := r.groupMap[group]; ok && g.Name() == name {
+			reassigned := false
+			for gvr, a := range r.gvrMap {
+				if gvr.Group == group {
+					r.groupMap[group] = a
+					reassigned = true
+					break
+				}
+			}
+			if !reassigned {
+				delete(r.groupMap, group)
+			}
+		}
+	}
+
+	delete(r.adapters, name)
+	return nil
+}
+
+// RegisterGVR maps a single GVR to an existing adapter.
+// If the GVR is already mapped, it is overwritten (update-in-place for ConstraintProfile reconciliation).
+func (r *Registry) RegisterGVR(gvr schema.GroupVersionResource, adapter types.Adapter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.gvrMap[gvr] = adapter
+
+	// Index by group — first adapter for each group wins.
+	if _, exists := r.groupMap[gvr.Group]; !exists {
+		r.groupMap[gvr.Group] = adapter
+	}
+}
+
+// UnregisterGVR removes the mapping for a single GVR.
+func (r *Registry) UnregisterGVR(gvr schema.GroupVersionResource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if adapter, exists := r.gvrMap[gvr]; exists {
+		delete(r.gvrMap, gvr)
+		// Clean up groupMap if this was the only GVR for the group
+		if g, ok := r.groupMap[gvr.Group]; ok && g.Name() == adapter.Name() {
+			// Check if any other GVR in this group still exists
+			found := false
+			for otherGVR := range r.gvrMap {
+				if otherGVR.Group == gvr.Group {
+					found = true
+					break
+				}
+			}
+			if !found {
+				delete(r.groupMap, gvr.Group)
+			}
+		}
+	}
+}
+
 // ForGroup returns the adapter that handles resources in the given API group.
 // This is useful for policy engines like Gatekeeper that create CRDs dynamically
 // (e.g., k8srequiredlabels.constraints.gatekeeper.sh).
