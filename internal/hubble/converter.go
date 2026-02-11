@@ -1,6 +1,7 @@
 package hubble
 
 import (
+	"strings"
 	"time"
 )
 
@@ -157,6 +158,28 @@ func ParseDropReason(code int32) DropReason {
 	default:
 		return DropReasonUnknown
 	}
+}
+
+// parseLabels converts Cilium proto labels ([]string in "source:key=value" format)
+// to a map[string]string, stripping the source prefix.
+func parseLabels(protoLabels []string) map[string]string {
+	if len(protoLabels) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(protoLabels))
+	for _, l := range protoLabels {
+		// Strip source prefix (e.g., "k8s:" from "k8s:app=frontend")
+		if idx := strings.Index(l, ":"); idx >= 0 {
+			l = l[idx+1:]
+		}
+		parts := strings.SplitN(l, "=", 2)
+		if len(parts) == 2 {
+			result[parts[0]] = parts[1]
+		} else if parts[0] != "" {
+			result[parts[0]] = ""
+		}
+	}
+	return result
 }
 
 // ParseProtocol converts an IP protocol number to our Protocol type.

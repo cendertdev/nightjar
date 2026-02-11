@@ -25,6 +25,7 @@ import (
 	"github.com/nightjarctl/nightjar/internal/adapters/webhookconfig"
 	"github.com/nightjarctl/nightjar/internal/correlator"
 	discoveryengine "github.com/nightjarctl/nightjar/internal/discovery"
+	"github.com/nightjarctl/nightjar/internal/hubble"
 	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/mcp"
 	"github.com/nightjarctl/nightjar/internal/notifier"
@@ -140,8 +141,24 @@ func main() {
 		rescanInterval,
 	)
 
+	// Build Hubble client (optional)
+	var hubbleClient *hubble.Client
+	if hubbleEnabled {
+		var clientErr error
+		hubbleClient, clientErr = hubble.NewClient(context.Background(), hubble.ClientOptions{
+			RelayAddress: hubbleAddr,
+			Logger:       logger,
+		})
+		if clientErr != nil {
+			logger.Fatal("Failed to create Hubble client", zap.Error(clientErr))
+		}
+		logger.Info("Hubble client created", zap.String("relay_address", hubbleAddr))
+	}
+
 	// Build correlator
-	corr := correlator.New(idx, clientset, logger)
+	corr := correlator.NewWithOptions(idx, clientset, logger, correlator.CorrelatorOptions{
+		HubbleClient: hubbleClient,
+	})
 
 	// Build notification dispatcher
 	dispatcherOpts := notifier.DefaultDispatcherOptions()
@@ -222,6 +239,31 @@ func main() {
 		logger.Fatal("Failed to add dispatcher to manager", zap.Error(err))
 	}
 
+	// Add runnable to log flow drop notifications (consumer for Hubble correlation)
+	if hubbleEnabled {
+		if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case notification, ok := <-corr.FlowDropNotifications():
+					if !ok {
+						return nil
+					}
+					logger.Info("Flow drop correlated",
+						zap.String("source_pod", notification.SourcePodName),
+						zap.String("dest_pod", notification.DestPodName),
+						zap.String("constraint", notification.Constraint.Name),
+						zap.Uint32("dest_port", notification.DestPort),
+						zap.String("protocol", notification.Protocol),
+					)
+				}
+			}
+		}}); err != nil {
+			logger.Fatal("Failed to add flow drop consumer to manager", zap.Error(err))
+		}
+	}
+
 	// Add runnable to start MCP server
 	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
 		return mcpServer.Start(ctx)
@@ -251,6 +293,11 @@ func main() {
 	}
 
 	// Cleanup
+	if hubbleClient != nil {
+		if err := hubbleClient.Close(); err != nil {
+			logger.Error("Failed to close Hubble client", zap.Error(err))
+		}
+	}
 	engine.Stop()
 }
 

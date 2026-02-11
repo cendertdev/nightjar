@@ -2,10 +2,14 @@ package hubble
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
+	flowpb "github.com/cilium/cilium/api/v1/flow"
+	observerpb "github.com/cilium/cilium/api/v1/observer"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -205,11 +209,8 @@ func (c *Client) connectionLoop(ctx context.Context) {
 }
 
 // connect establishes a gRPC connection to Hubble Relay.
-func (c *Client) connect(ctx context.Context) error {
-	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(dialCtx, c.opts.RelayAddress,
+func (c *Client) connect(_ context.Context) error {
+	conn, err := grpc.NewClient(c.opts.RelayAddress,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second,
@@ -218,34 +219,159 @@ func (c *Client) connect(ctx context.Context) error {
 		}),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to dial Hubble Relay: %w", err)
+		return fmt.Errorf("failed to create Hubble Relay client: %w", err)
 	}
 
 	c.conn = conn
 	return nil
 }
 
-// streamFlows streams flow events from Hubble Relay.
-// This is a placeholder that needs the actual Hubble observer proto.
-// In production, this would use the observer.ObserverClient.GetFlows RPC.
+// streamFlows streams dropped flow events from Hubble Relay via the Observer gRPC API.
 func (c *Client) streamFlows(ctx context.Context) error {
-	// This is a simplified implementation that simulates flow streaming.
-	// In production, this would:
-	// 1. Create an observer.ObserverClient from the gRPC connection
-	// 2. Call GetFlows with a filter for verdict=DROPPED
-	// 3. Process each flow event and convert to FlowDrop
+	observer := observerpb.NewObserverClient(c.conn)
 
-	// For now, we just wait for context cancellation or stop signal
-	// The actual implementation requires Cilium's observer proto types.
-
-	c.logger.Info("waiting for flow events (stub implementation)")
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-c.stopCh:
-		return nil
+	req := &observerpb.GetFlowsRequest{
+		Follow: true,
+		Whitelist: []*flowpb.FlowFilter{
+			{Verdict: []flowpb.Verdict{flowpb.Verdict_DROPPED}},
+		},
 	}
+
+	stream, err := observer.GetFlows(ctx, req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("GetFlows: %w", err)
+	}
+
+	c.logger.Info("streaming dropped flows from Hubble Relay")
+
+	for {
+		select {
+		case <-c.stopCh:
+			return nil
+		default:
+		}
+
+		resp, err := stream.Recv()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("stream recv: %w", err)
+		}
+
+		f := resp.GetFlow()
+		if f == nil {
+			continue
+		}
+
+		drop, ok := convertFlow(f)
+		if !ok {
+			continue
+		}
+
+		c.recordFlowDrop(drop)
+	}
+}
+
+// convertFlow converts a Cilium Flow proto to an internal FlowDrop.
+// Returns false if the flow cannot be converted (e.g. not a drop).
+func convertFlow(f *flowpb.Flow) (FlowDrop, bool) {
+	if f.GetVerdict() != flowpb.Verdict_DROPPED {
+		return FlowDrop{}, false
+	}
+
+	drop := FlowDrop{
+		TraceID:    f.GetUuid(),
+		DropReason: ParseDropReason(int32(f.GetDropReasonDesc())),
+	}
+
+	if t := f.GetTime(); t != nil {
+		drop.Time = t.AsTime()
+	} else {
+		drop.Time = time.Now()
+	}
+
+	if src := f.GetSource(); src != nil {
+		drop.Source = Endpoint{
+			Identity:  src.GetIdentity(),
+			Namespace: src.GetNamespace(),
+			PodName:   src.GetPodName(),
+			Labels:    parseLabels(src.GetLabels()),
+		}
+		for _, w := range src.GetWorkloads() {
+			if w != nil {
+				drop.Source.Workloads = append(drop.Source.Workloads, WorkloadRef{
+					Kind: w.GetKind(),
+					Name: w.GetName(),
+				})
+			}
+		}
+	}
+
+	if dst := f.GetDestination(); dst != nil {
+		drop.Destination = Endpoint{
+			Identity:  dst.GetIdentity(),
+			Namespace: dst.GetNamespace(),
+			PodName:   dst.GetPodName(),
+			Labels:    parseLabels(dst.GetLabels()),
+		}
+		for _, w := range dst.GetWorkloads() {
+			if w != nil {
+				drop.Destination.Workloads = append(drop.Destination.Workloads, WorkloadRef{
+					Kind: w.GetKind(),
+					Name: w.GetName(),
+				})
+			}
+		}
+	}
+
+	if ip := f.GetIP(); ip != nil {
+		drop.IP = IPInfo{
+			Source:      ip.GetSource(),
+			Destination: ip.GetDestination(),
+		}
+	}
+
+	if l4 := f.GetL4(); l4 != nil {
+		switch {
+		case l4.GetTCP() != nil:
+			tcp := l4.GetTCP()
+			drop.L4 = L4Info{
+				Protocol:        ProtocolTCP,
+				SourcePort:      tcp.GetSourcePort(),
+				DestinationPort: tcp.GetDestinationPort(),
+			}
+			if flags := tcp.GetFlags(); flags != nil {
+				drop.L4.TCP = &TCPInfo{
+					Flags: TCPFlags{
+						SYN: flags.GetSYN(),
+						ACK: flags.GetACK(),
+						FIN: flags.GetFIN(),
+						RST: flags.GetRST(),
+					},
+				}
+			}
+		case l4.GetUDP() != nil:
+			udp := l4.GetUDP()
+			drop.L4 = L4Info{
+				Protocol:        ProtocolUDP,
+				SourcePort:      udp.GetSourcePort(),
+				DestinationPort: udp.GetDestinationPort(),
+			}
+		case l4.GetICMPv4() != nil:
+			drop.L4 = L4Info{Protocol: ProtocolICMP}
+		default:
+			drop.L4 = L4Info{Protocol: ProtocolUnknown}
+		}
+	}
+
+	return drop, true
 }
 
 // setState updates the connection state.

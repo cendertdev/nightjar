@@ -146,6 +146,70 @@ func TestDropReason_IsPolicyDrop(t *testing.T) {
 	}
 }
 
+func TestParseLabels(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected map[string]string
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name:     "empty input",
+			input:    []string{},
+			expected: nil,
+		},
+		{
+			name:  "standard k8s labels",
+			input: []string{"k8s:app=frontend", "k8s:version=v2"},
+			expected: map[string]string{
+				"app":     "frontend",
+				"version": "v2",
+			},
+		},
+		{
+			name:  "reserved identity",
+			input: []string{"reserved:host"},
+			expected: map[string]string{
+				"host": "",
+			},
+		},
+		{
+			name:  "label with equals in value",
+			input: []string{"k8s:config=key=value"},
+			expected: map[string]string{
+				"config": "key=value",
+			},
+		},
+		{
+			name:  "no source prefix",
+			input: []string{"app=backend"},
+			expected: map[string]string{
+				"app": "backend",
+			},
+		},
+		{
+			name:  "mixed formats",
+			input: []string{"k8s:app=web", "reserved:world", "custom:tier=frontend"},
+			expected: map[string]string{
+				"app":   "web",
+				"world": "",
+				"tier":  "frontend",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseLabels(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 // String implements Stringer for DropReason (for test output)
 func (r DropReason) String() string {
 	return string(r)
