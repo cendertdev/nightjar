@@ -72,6 +72,8 @@ type Engine struct {
 	watchedGVRs     map[schema.GroupVersionResource]bool
 	informerFactory dynamicinformer.DynamicSharedInformerFactory
 	stopCh          chan struct{}
+	stopOnce        sync.Once
+	ctx             context.Context // parent context from Start(), used by profile informers
 	informers       map[schema.GroupVersionResource]cache.SharedIndexInformer
 
 	rescanInterval time.Duration
@@ -150,6 +152,9 @@ func (e *Engine) SetCheckAnnotation(enabled bool) {
 func (e *Engine) Start(ctx context.Context) error {
 	e.logger.Info("Starting discovery engine", zap.Duration("rescan_interval", e.rescanInterval))
 
+	// Store parent context for profile informer event handlers.
+	e.ctx = ctx
+
 	// Initial scan
 	if err := e.scan(ctx); err != nil {
 		return err
@@ -219,24 +224,22 @@ func (e *Engine) scan(ctx context.Context) error {
 		e.refreshAnnotatedCRDs(ctx)
 	}
 
+	// Start informers for newly discovered GVRs
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	e.logger.Info("Discovery scan complete",
 		zap.Int("discovered", len(discovered)),
 		zap.Int("previously_watched", len(e.watchedGVRs)),
 	)
 
-	// Also include profile-suppressed GVRs: profiles with enabled=false exclude from discovery
-	e.mu.RLock()
+	// Build profile-suppressed GVR set: profiles with enabled=false exclude from discovery
 	suppressed := make(map[schema.GroupVersionResource]bool)
 	for _, ps := range e.profiles {
 		if !ps.enabled {
 			suppressed[ps.gvr] = true
 		}
 	}
-	e.mu.RUnlock()
-
-	// Start informers for newly discovered GVRs
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	for _, gvr := range discovered {
 		if suppressed[gvr] {
 			continue
@@ -399,9 +402,18 @@ func (e *Engine) parseObject(ctx context.Context, gvr schema.GroupVersionResourc
 // isConstraintLike determines whether a GVR is likely a constraint/policy resource.
 // Caller must NOT hold e.mu — this method acquires a read lock.
 func (e *Engine) isConstraintLike(gvr schema.GroupVersionResource, resourceName string) bool {
+	// Snapshot all mu-protected state under a single read lock for consistency.
 	e.mu.RLock()
 	groups := e.policyGroups
 	hints := e.nameHints
+	profileMatch := false
+	for _, ps := range e.profiles {
+		if ps.enabled && ps.gvr == gvr {
+			profileMatch = true
+			break
+		}
+	}
+	annotated := e.annotatedCRDs[gvr]
 	e.mu.RUnlock()
 
 	// Check 1: Is this a known policy group?
@@ -431,19 +443,11 @@ func (e *Engine) isConstraintLike(gvr schema.GroupVersionResource, resourceName 
 	}
 
 	// Check 5: ConstraintProfile CRDs that register additional types
-	e.mu.RLock()
-	for _, ps := range e.profiles {
-		if ps.enabled && ps.gvr == gvr {
-			e.mu.RUnlock()
-			return true
-		}
+	if profileMatch {
+		return true
 	}
-	e.mu.RUnlock()
 
 	// Check 6: CRD annotation override
-	e.mu.RLock()
-	annotated := e.annotatedCRDs[gvr]
-	e.mu.RUnlock()
 	return annotated
 }
 
@@ -594,7 +598,10 @@ func (e *Engine) startProfileInformer(gvr schema.GroupVersionResource, stopCh ch
 
 	informer := factory.ForResource(gvr).Informer()
 
-	ctx := context.Background()
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			e.handleAdd(ctx, gvr, obj)
@@ -688,15 +695,17 @@ func (e *Engine) refreshAnnotatedCRDs(ctx context.Context) {
 	e.mu.Unlock()
 }
 
-// Stop stops all informers and the discovery engine.
+// Stop stops all informers and the discovery engine. Safe to call multiple times.
 func (e *Engine) Stop() {
-	e.logger.Info("Stopping discovery engine")
-	close(e.stopCh)
+	e.stopOnce.Do(func() {
+		e.logger.Info("Stopping discovery engine")
+		close(e.stopCh)
 
-	// Also stop profile-managed informers
-	e.mu.Lock()
-	for _, ps := range e.profiles {
-		e.stopProfileInformerLocked(ps)
-	}
-	e.mu.Unlock()
+		// Also stop profile-managed informers
+		e.mu.Lock()
+		for _, ps := range e.profiles {
+			e.stopProfileInformerLocked(ps)
+		}
+		e.mu.Unlock()
+	})
 }
