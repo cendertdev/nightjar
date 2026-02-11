@@ -182,7 +182,15 @@ hubble:
   relayAddress: hubble-relay.kube-system.svc:4245
 ```
 
-When enabled, Nightjar correlates Hubble flow drops with network policies for real-time traffic analysis.
+When enabled, Nightjar connects to Hubble Relay via gRPC and subscribes to a
+filtered stream of `verdict=DROPPED` flow events. Each dropped flow is
+converted to an internal `FlowDrop` and correlated with NetworkPolicy
+constraints in the affected namespaces. Matched drops appear as
+`FlowDropNotification` events, which are currently logged at Info level.
+
+The client automatically reconnects with exponential backoff if the Hubble
+Relay connection is lost. Flow events that arrive faster than they can be
+processed are dropped (buffer size: 1000) with a warning log.
 
 ---
 
