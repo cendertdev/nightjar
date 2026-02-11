@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Hubble flow drop streaming — connects to Hubble Relay and streams `verdict=DROPPED` flows for real-time network policy correlation
 
+### Fixed
+
+- Hubble client: fix data race on connection field during shutdown
+- Hubble client: use signal-handler context instead of background context for lifecycle management
+- Hubble client: fix incorrect drop reason mappings and replace magic integers with proto enum constants
+- Hubble client: add explicit ICMPv6 flow handling
+- Hubble client: move DropReason.String() to production code
+- Hubble client: fix reconnect counter to increment on stream disconnect, not after backoff timer
+- Hubble client: deep-copy label maps and workload slices in FlowDropBuilder.Build()
+
 ## [0.1.0] - 2026-02-10
 
 ### Added

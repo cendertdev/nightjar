@@ -3,6 +3,8 @@ package hubble
 import (
 	"strings"
 	"time"
+
+	flowpb "github.com/cilium/cilium/api/v1/flow"
 )
 
 // FlowConverter converts Hubble proto flow messages to internal FlowDrop types.
@@ -134,26 +136,50 @@ func (b *FlowDropBuilder) WithPolicyName(name string) *FlowDropBuilder {
 }
 
 // Build returns the constructed FlowDrop.
+// The returned value does not share map or slice references with the builder.
 func (b *FlowDropBuilder) Build() FlowDrop {
-	return b.drop
+	result := b.drop
+	result.Source.Labels = copyStringMap(b.drop.Source.Labels)
+	result.Destination.Labels = copyStringMap(b.drop.Destination.Labels)
+	result.Source.Workloads = copyWorkloads(b.drop.Source.Workloads)
+	result.Destination.Workloads = copyWorkloads(b.drop.Destination.Workloads)
+	return result
+}
+
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	result := make(map[string]string, len(m))
+	for k, v := range m {
+		result[k] = v
+	}
+	return result
+}
+
+func copyWorkloads(ws []WorkloadRef) []WorkloadRef {
+	if ws == nil {
+		return nil
+	}
+	result := make([]WorkloadRef, len(ws))
+	copy(result, ws)
+	return result
 }
 
 // ParseDropReason converts a Hubble drop reason code to our internal type.
-// These mappings are based on Cilium's api/v1/flow/flow.proto DropReason enum.
 func ParseDropReason(code int32) DropReason {
-	// Cilium drop reason codes (from flow.proto)
-	switch code {
-	case 130, 133, 134: // POLICY_DENIED, POLICY_DENIED_L3_L4, POLICY_DENIED_L7
+	switch flowpb.DropReason(code) {
+	case flowpb.DropReason_POLICY_DENIED, flowpb.DropReason_POLICY_DENY:
 		return DropReasonPolicy
-	case 131: // INVALID_IDENTITY
+	case flowpb.DropReason_AUTH_REQUIRED, flowpb.DropReason_INVALID_IDENTITY:
 		return DropReasonPolicyAuth
-	case 181: // CT_NO_MAP_FOUND
+	case flowpb.DropReason_CT_NO_MAP_FOUND, flowpb.DropReason_FIB_LOOKUP_FAILED:
 		return DropReasonNoMapping
-	case 132: // Invalid packet
+	case flowpb.DropReason_INVALID_SOURCE_IP, flowpb.DropReason_INVALID_PACKET_DROPPED:
 		return DropReasonInvalidPacket
-	case 168: // TTL_EXCEEDED
+	case flowpb.DropReason_TTL_EXCEEDED:
 		return DropReasonTTLExceeded
-	case 153: // PROXY_REDIRECT_NOT_FOUND
+	case flowpb.DropReason_PROXY_REDIRECTION_NOT_SUPPORTED_FOR_PROTOCOL:
 		return DropReasonProxyRedirect
 	default:
 		return DropReasonUnknown

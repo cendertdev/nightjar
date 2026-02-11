@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	flowpb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,24 +76,51 @@ func TestFlowDropBuilder_UDP(t *testing.T) {
 	assert.Nil(t, drop.L4.TCP)
 }
 
+func TestFlowDropBuilder_Build_DoesNotShareReferences(t *testing.T) {
+	b := NewFlowDropBuilder().
+		WithSource("ns", "pod1", map[string]string{"app": "web"}).
+		WithSourceWorkload("Deployment", "web").
+		WithDestination("ns", "pod2", map[string]string{"app": "api"}).
+		WithDestinationWorkload("Deployment", "api")
+
+	drop := b.Build()
+
+	// Mutate the builder's internal state after Build()
+	b.WithSource("ns", "pod1-mutated", map[string]string{"app": "mutated"})
+	b.WithSourceWorkload("StatefulSet", "mutated")
+	b.WithDestination("ns", "pod2-mutated", map[string]string{"app": "mutated"})
+	b.WithDestinationWorkload("StatefulSet", "mutated")
+
+	// The previously built drop must be unaffected
+	assert.Equal(t, "web", drop.Source.Labels["app"])
+	assert.Equal(t, "api", drop.Destination.Labels["app"])
+	assert.Len(t, drop.Source.Workloads, 1)
+	assert.Equal(t, "Deployment", drop.Source.Workloads[0].Kind)
+	assert.Len(t, drop.Destination.Workloads, 1)
+	assert.Equal(t, "Deployment", drop.Destination.Workloads[0].Kind)
+}
+
 func TestParseDropReason(t *testing.T) {
 	tests := []struct {
+		name     string
 		code     int32
 		expected DropReason
 	}{
-		{130, DropReasonPolicy},
-		{133, DropReasonPolicy},
-		{134, DropReasonPolicy},
-		{131, DropReasonPolicyAuth},
-		{181, DropReasonNoMapping},
-		{132, DropReasonInvalidPacket},
-		{168, DropReasonTTLExceeded},
-		{153, DropReasonProxyRedirect},
-		{999, DropReasonUnknown},
+		{"POLICY_DENIED", int32(flowpb.DropReason_POLICY_DENIED), DropReasonPolicy},
+		{"POLICY_DENY", int32(flowpb.DropReason_POLICY_DENY), DropReasonPolicy},
+		{"AUTH_REQUIRED", int32(flowpb.DropReason_AUTH_REQUIRED), DropReasonPolicyAuth},
+		{"INVALID_IDENTITY", int32(flowpb.DropReason_INVALID_IDENTITY), DropReasonPolicyAuth},
+		{"CT_NO_MAP_FOUND", int32(flowpb.DropReason_CT_NO_MAP_FOUND), DropReasonNoMapping},
+		{"FIB_LOOKUP_FAILED", int32(flowpb.DropReason_FIB_LOOKUP_FAILED), DropReasonNoMapping},
+		{"INVALID_SOURCE_IP", int32(flowpb.DropReason_INVALID_SOURCE_IP), DropReasonInvalidPacket},
+		{"INVALID_PACKET_DROPPED", int32(flowpb.DropReason_INVALID_PACKET_DROPPED), DropReasonInvalidPacket},
+		{"TTL_EXCEEDED", int32(flowpb.DropReason_TTL_EXCEEDED), DropReasonTTLExceeded},
+		{"PROXY_REDIRECTION_NOT_SUPPORTED", int32(flowpb.DropReason_PROXY_REDIRECTION_NOT_SUPPORTED_FOR_PROTOCOL), DropReasonProxyRedirect},
+		{"unknown code", 999, DropReasonUnknown},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.expected.String(), func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			result := ParseDropReason(tt.code)
 			assert.Equal(t, tt.expected, result)
 		})
@@ -208,9 +236,4 @@ func TestParseLabels(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-// String implements Stringer for DropReason (for test output)
-func (r DropReason) String() string {
-	return string(r)
 }

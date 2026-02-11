@@ -134,15 +134,13 @@ type ClientStats struct {
 }
 
 // Close stops the client and releases resources.
+// The connection is closed by connectionLoop before it exits,
+// so Close only needs to signal stop and wait.
 func (c *Client) Close() error {
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
 	})
 	c.wg.Wait()
-
-	if c.conn != nil {
-		return c.conn.Close()
-	}
 	return nil
 }
 
@@ -180,9 +178,6 @@ func (c *Client) connectionLoop(ctx context.Context) {
 				return
 			case <-time.After(reconnectInterval):
 				reconnectInterval = c.nextReconnectInterval(reconnectInterval)
-				c.stateMu.Lock()
-				c.reconnects++
-				c.stateMu.Unlock()
 			}
 			continue
 		}
@@ -204,7 +199,10 @@ func (c *Client) connectionLoop(ctx context.Context) {
 			c.conn = nil
 		}
 
-		c.setState(StateReconnecting)
+		c.stateMu.Lock()
+		c.state = StateReconnecting
+		c.reconnects++
+		c.stateMu.Unlock()
 	}
 }
 
@@ -365,6 +363,8 @@ func convertFlow(f *flowpb.Flow) (FlowDrop, bool) {
 				DestinationPort: udp.GetDestinationPort(),
 			}
 		case l4.GetICMPv4() != nil:
+			drop.L4 = L4Info{Protocol: ProtocolICMP}
+		case l4.GetICMPv6() != nil:
 			drop.L4 = L4Info{Protocol: ProtocolICMP}
 		default:
 			drop.L4 = L4Info{Protocol: ProtocolUnknown}
