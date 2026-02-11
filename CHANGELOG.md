@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Hubble flow drop streaming — connects to Hubble Relay and streams `verdict=DROPPED` flows for real-time network policy correlation
+- Generic adapter field-path configuration — ConstraintProfile `fieldPaths` enables custom extraction of selectors, namespace selectors, effects, and summaries from arbitrary CRD schemas
+- ConstraintProfile controller — controller-runtime reconciler for immediate profile registration/unregistration (no rescan delay)
+- CRD annotation discovery — CRDs annotated with `nightjar.io/is-policy: "true"` are automatically treated as constraint sources
+- Discovery tuning — configurable `additionalPolicyGroups`, `additionalPolicyNameHints`, and `checkCRDAnnotations` flags for heuristic customization
+- Dynamic adapter registry — `Unregister`, `RegisterGVR`, and `UnregisterGVR` methods for runtime profile-driven adapter management
+- Example ConstraintProfiles for cert-manager, Crossplane, and Argo Rollouts
 
 ### Fixed
 

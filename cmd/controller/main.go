@@ -4,18 +4,23 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	v1alpha1 "github.com/nightjarctl/nightjar/api/v1alpha1"
 	"github.com/nightjarctl/nightjar/internal/adapters"
 	"github.com/nightjarctl/nightjar/internal/adapters/gatekeeper"
 	"github.com/nightjarctl/nightjar/internal/adapters/kyverno"
@@ -23,6 +28,7 @@ import (
 	"github.com/nightjarctl/nightjar/internal/adapters/networkpolicy"
 	"github.com/nightjarctl/nightjar/internal/adapters/resourcequota"
 	"github.com/nightjarctl/nightjar/internal/adapters/webhookconfig"
+	internalcontroller "github.com/nightjarctl/nightjar/internal/controller"
 	"github.com/nightjarctl/nightjar/internal/correlator"
 	discoveryengine "github.com/nightjarctl/nightjar/internal/discovery"
 	"github.com/nightjarctl/nightjar/internal/hubble"
@@ -33,14 +39,24 @@ import (
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
+var scheme = runtime.NewScheme()
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+}
+
 func main() {
 	var (
-		metricsAddr    string
-		healthAddr     string
-		leaderElect    bool
-		rescanInterval time.Duration
-		hubbleAddr     string
-		hubbleEnabled  bool
+		metricsAddr            string
+		healthAddr             string
+		leaderElect            bool
+		rescanInterval         time.Duration
+		hubbleAddr             string
+		hubbleEnabled          bool
+		additionalPolicyGroups string
+		additionalNameHints    string
+		checkCRDAnnotations    bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
@@ -49,6 +65,9 @@ func main() {
 	flag.DurationVar(&rescanInterval, "rescan-interval", 5*time.Minute, "How often to rescan for new CRDs.")
 	flag.StringVar(&hubbleAddr, "hubble-relay-address", "hubble-relay.kube-system.svc:4245", "Hubble Relay gRPC address.")
 	flag.BoolVar(&hubbleEnabled, "hubble-enabled", false, "Enable Hubble flow observation for real-time traffic drop detection.")
+	flag.StringVar(&additionalPolicyGroups, "additional-policy-groups", "", "Comma-separated list of additional API groups to treat as policy sources.")
+	flag.StringVar(&additionalNameHints, "additional-name-hints", "", "Comma-separated list of additional resource name substrings for heuristic detection.")
+	flag.BoolVar(&checkCRDAnnotations, "check-crd-annotations", true, "Check CRDs for nightjar.io/is-policy annotation during discovery scan.")
 	flag.Parse()
 
 	// Setup logger
@@ -70,6 +89,7 @@ func main() {
 	// Setup controller-runtime manager
 	cfg := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 scheme,
 		LeaderElection:         leaderElect,
 		LeaderElectionID:       "nightjar-leader",
 		HealthProbeBindAddress: healthAddr,
@@ -140,6 +160,26 @@ func main() {
 		idx,
 		rescanInterval,
 	)
+
+	// Configure discovery heuristics
+	if additionalPolicyGroups != "" {
+		engine.SetAdditionalGroups(splitCSV(additionalPolicyGroups))
+	}
+	if additionalNameHints != "" {
+		engine.SetAdditionalHints(splitCSV(additionalNameHints))
+	}
+	engine.SetCheckAnnotation(checkCRDAnnotations)
+
+	// Setup ConstraintProfile reconciler (controller-runtime reconciler because
+	// it watches a Nightjar-owned typed CRD, not external unstructured objects).
+	profileReconciler := &internalcontroller.ConstraintProfileReconciler{
+		Client: mgr.GetClient(),
+		Logger: logger,
+		Engine: engine,
+	}
+	if err := profileReconciler.SetupWithManager(mgr); err != nil {
+		logger.Fatal("Failed to set up ConstraintProfile controller", zap.Error(err))
+	}
 
 	// Setup signal handler context (before Hubble client so it responds to SIGTERM)
 	ctx := ctrl.SetupSignalHandler()
@@ -326,4 +366,16 @@ type runnableFunc struct {
 
 func (r *runnableFunc) Start(ctx context.Context) error {
 	return r.fn(ctx)
+}
+
+// splitCSV splits a comma-separated string into trimmed, non-empty items.
+func splitCSV(s string) []string {
+	var result []string
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

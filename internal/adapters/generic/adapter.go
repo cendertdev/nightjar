@@ -9,9 +9,17 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	v1alpha1 "github.com/nightjarctl/nightjar/api/v1alpha1"
 	"github.com/nightjarctl/nightjar/internal/types"
 	"github.com/nightjarctl/nightjar/internal/util"
 )
+
+// ParseConfig provides optional overrides for generic adapter parsing.
+// The discovery engine populates this from ConstraintProfile resources.
+type ParseConfig struct {
+	FieldPaths       *v1alpha1.FieldPaths
+	SeverityOverride string
+}
 
 const (
 	annotationSummary  = "nightjar.io/summary"
@@ -158,6 +166,70 @@ func (a *Adapter) ParseWithGVR(ctx context.Context, obj *unstructured.Unstructur
 	return []types.Constraint{c}, nil
 }
 
+// ParseWithConfig parses a CRD using optional field-path configuration from a
+// ConstraintProfile. When cfg.FieldPaths is non-nil, the configured paths are
+// used instead of the default hardcoded selector probing.
+func (a *Adapter) ParseWithConfig(ctx context.Context, obj *unstructured.Unstructured, gvr schema.GroupVersionResource, cfg ParseConfig) ([]types.Constraint, error) {
+	constraints, err := a.ParseWithGVR(ctx, obj, gvr)
+	if err != nil {
+		return nil, err
+	}
+	if len(constraints) == 0 {
+		return constraints, nil
+	}
+
+	c := &constraints[0]
+
+	// Apply severity override from ConstraintProfile, but only when
+	// no per-object annotation is present (annotation takes highest precedence).
+	if cfg.SeverityOverride != "" && getAnnotation(obj.GetAnnotations(), annotationSeverity) == "" {
+		switch cfg.SeverityOverride {
+		case "Critical":
+			c.Severity = types.SeverityCritical
+		case "Warning":
+			c.Severity = types.SeverityWarning
+		case "Info":
+			c.Severity = types.SeverityInfo
+		}
+	}
+
+	if cfg.FieldPaths == nil {
+		return constraints, nil
+	}
+
+	// Re-extract selectors using configured paths
+	if cfg.FieldPaths.SelectorPath != "" {
+		fields := splitFieldPath(cfg.FieldPaths.SelectorPath)
+		if sel := util.SafeNestedLabelSelector(obj.Object, fields...); sel != nil {
+			c.WorkloadSelector = sel
+		}
+	}
+	if cfg.FieldPaths.NamespaceSelectorPath != "" {
+		fields := splitFieldPath(cfg.FieldPaths.NamespaceSelectorPath)
+		if sel := util.SafeNestedLabelSelector(obj.Object, fields...); sel != nil {
+			c.NamespaceSelector = sel
+		}
+	}
+
+	// Extract effect from configured path
+	if cfg.FieldPaths.EffectPath != "" {
+		fields := splitFieldPath(cfg.FieldPaths.EffectPath)
+		if effect := util.SafeNestedString(obj.Object, fields...); effect != "" {
+			c.Effect = effect
+		}
+	}
+
+	// Extract summary from configured path (annotation still takes precedence)
+	if cfg.FieldPaths.SummaryPath != "" && getAnnotation(obj.GetAnnotations(), annotationSummary) == "" {
+		fields := splitFieldPath(cfg.FieldPaths.SummaryPath)
+		if summary := util.SafeNestedString(obj.Object, fields...); summary != "" {
+			c.Summary = summary
+		}
+	}
+
+	return constraints, nil
+}
+
 // Parse implements the Adapter interface but requires GVR context.
 // Use ParseWithGVR for direct calls.
 func (a *Adapter) Parse(ctx context.Context, obj *unstructured.Unstructured) ([]types.Constraint, error) {
@@ -215,4 +287,19 @@ func guessResource(kind string) string {
 		return lower + "es"
 	}
 	return lower + "s"
+}
+
+// splitFieldPath splits a dot-delimited field path into components.
+// Returns nil for empty paths. Filters out empty segments from leading/trailing dots.
+func splitFieldPath(path string) []string {
+	if path == "" {
+		return nil
+	}
+	var result []string
+	for _, part := range strings.Split(path, ".") {
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

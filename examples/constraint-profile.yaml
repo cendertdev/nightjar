@@ -17,6 +17,12 @@ spec:
   enabled: true
   severity: Warning
   debounceSeconds: 60
+  # Custom field paths tell the generic adapter where to find selectors and effects.
+  fieldPaths:
+    selectorPath: "spec.target.workloads"
+    namespaceSelectorPath: "spec.scope.namespaces"
+    effectPath: "spec.action"
+    summaryPath: "spec.description"
 ---
 # Override settings for Cilium network policies.
 # Raises severity to Critical and reduces debounce for faster notifications.

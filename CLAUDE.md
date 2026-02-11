@@ -43,7 +43,8 @@ internal/types/        Constraint model, Adapter interface, RemediationStep, Req
 internal/util/         Safe unstructured field helpers — use these everywhere
 internal/adapters/     Registry + one sub-package per policy engine
 internal/annotations/  Structured annotation key constants for Events and workloads
-internal/discovery/    CRD scanner, dynamic informer lifecycle
+internal/controller/   ConstraintProfile reconciler (controller-runtime)
+internal/discovery/    CRD scanner, dynamic informer lifecycle, profile registration
 internal/indexer/      In-memory constraint store, query by namespace/labels/type
 internal/correlator/   K8s event watcher → constraint matcher
 internal/notifier/     Notification rendering + dispatch + workload annotator + report reconciler

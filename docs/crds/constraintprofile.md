@@ -142,6 +142,63 @@ Override the default debounce interval for notifications:
 
 Default: From `requirements.debounceSeconds` in Helm values (default 120).
 
+### fieldPaths
+
+Configure custom field extraction paths for the `generic` adapter. Each path is a dot-delimited string that tells the generic adapter where to find specific fields in the CRD's spec.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `selectorPath` | string | Path to label selector (e.g., `spec.target.workloads`) |
+| `namespaceSelectorPath` | string | Path to namespace selector (e.g., `spec.scope.namespaces`) |
+| `effectPath` | string | Path to the policy effect/action (e.g., `spec.action`) |
+| `summaryPath` | string | Path to a human-readable summary (e.g., `spec.description`) |
+
+All fields are optional. When unset, the generic adapter uses its default extraction behavior.
+
+**Example:**
+```yaml
+apiVersion: nightjar.io/v1alpha1
+kind: ConstraintProfile
+metadata:
+  name: custom-policy
+spec:
+  gvr:
+    group: policy.company.com
+    version: v1
+    resource: deploymentrestrictions
+  adapter: generic
+  enabled: true
+  severity: Warning
+  fieldPaths:
+    selectorPath: "spec.target.workloads"
+    namespaceSelectorPath: "spec.scope.namespaces"
+    effectPath: "spec.action"
+    summaryPath: "spec.description"
+```
+
+**Precedence:** When both a `fieldPaths.summaryPath` value and a `nightjar.io/summary` annotation exist on the resource, the annotation takes precedence. Similarly, a `nightjar.io/severity` annotation on the resource overrides the profile's `severity` setting.
+
+---
+
+## CRD Annotation Discovery
+
+CRD authors can annotate their CustomResourceDefinition with `nightjar.io/is-policy: "true"` to tell Nightjar to automatically discover and watch instances of that CRD:
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: networkrules.security.mycompany.com
+  annotations:
+    nightjar.io/is-policy: "true"
+spec:
+  # ...
+```
+
+When this annotation is present, the discovery engine automatically treats instances of this CRD as constraint-like resources. No ConstraintProfile is needed for basic discovery, though you can still create one to customize severity, field paths, or debounce settings.
+
+This feature can be disabled via the `--check-crd-annotations=false` flag or the `discovery.checkCRDAnnotations` Helm value.
+
 ---
 
 ## Use Cases
@@ -200,6 +257,30 @@ spec:
   adapter: resourcequota
   enabled: true
   severity: Critical
+```
+
+### Configure Custom Field Extraction
+
+Your CRD stores selectors and effects in non-standard locations:
+
+```yaml
+apiVersion: nightjar.io/v1alpha1
+kind: ConstraintProfile
+metadata:
+  name: custom-deployment-restrictions
+spec:
+  gvr:
+    group: policy.internal.company.com
+    version: v1
+    resource: deploymentrestrictions
+  adapter: generic
+  enabled: true
+  severity: Warning
+  fieldPaths:
+    selectorPath: "spec.target.workloads"
+    namespaceSelectorPath: "spec.scope.namespaces"
+    effectPath: "spec.action"
+    summaryPath: "spec.description"
 ```
 
 ### Reduce Notification Noise
@@ -296,14 +377,11 @@ spec:
 ## Lifecycle
 
 1. **Apply Profile**: `kubectl apply -f profile.yaml`
-2. **Controller Detects**: Within `rescanInterval` (default 5m)
-3. **Informer Started**: If enabled and CRDs exist
+2. **Controller Reconciles**: The ConstraintProfile controller detects the change immediately via a controller-runtime watch
+3. **Informer Started**: If enabled, a dedicated informer is started for the profile's GVR
 4. **Parsing Begins**: New constraints appear in reports
 
-To force immediate detection:
-```bash
-kubectl rollout restart deployment -n nightjar-system nightjar-controller
-```
+Deletion is also handled immediately — when a ConstraintProfile is deleted, the controller unregisters the profile and cleans up all associated constraints from the indexer.
 
 ---
 

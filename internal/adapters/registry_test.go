@@ -245,6 +245,106 @@ func TestForGroup_FirstAdapterWins(t *testing.T) {
 	assert.Equal(t, "first", result.Name())
 }
 
+func TestUnregister_Success(t *testing.T) {
+	r := NewRegistry()
+	gvr := schema.GroupVersionResource{Group: "test.io", Version: "v1", Resource: "things"}
+	adapter := &fakeAdapter{name: "removable", gvrs: []schema.GroupVersionResource{gvr}}
+
+	require.NoError(t, r.Register(adapter))
+	assert.Len(t, r.All(), 1)
+	assert.NotNil(t, r.ForGVR(gvr))
+
+	err := r.Unregister("removable")
+	require.NoError(t, err)
+	assert.Empty(t, r.All())
+	assert.Nil(t, r.ForGVR(gvr))
+	assert.Nil(t, r.ForName("removable"))
+	assert.Nil(t, r.ForGroup("test.io"))
+}
+
+func TestUnregister_NotFound(t *testing.T) {
+	r := NewRegistry()
+	err := r.Unregister("nonexistent")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not registered")
+}
+
+func TestRegisterGVR(t *testing.T) {
+	r := NewRegistry()
+	gvr := schema.GroupVersionResource{Group: "dynamic.io", Version: "v1", Resource: "customs"}
+	adapter := &fakeAdapter{name: "generic", gvrs: nil}
+
+	require.NoError(t, r.Register(adapter))
+
+	r.RegisterGVR(gvr, adapter)
+	assert.Equal(t, "generic", r.ForGVR(gvr).Name())
+}
+
+func TestRegisterGVR_Overwrite(t *testing.T) {
+	r := NewRegistry()
+	gvr := schema.GroupVersionResource{Group: "shared.io", Version: "v1", Resource: "things"}
+	adapter1 := &fakeAdapter{name: "first", gvrs: []schema.GroupVersionResource{gvr}}
+	adapter2 := &fakeAdapter{name: "second", gvrs: nil}
+
+	require.NoError(t, r.Register(adapter1))
+	require.NoError(t, r.Register(adapter2))
+
+	// Overwrite gvr to point to adapter2
+	r.RegisterGVR(gvr, adapter2)
+	assert.Equal(t, "second", r.ForGVR(gvr).Name())
+}
+
+func TestUnregisterGVR(t *testing.T) {
+	r := NewRegistry()
+	gvr := schema.GroupVersionResource{Group: "test.io", Version: "v1", Resource: "things"}
+	adapter := &fakeAdapter{name: "owner", gvrs: nil}
+
+	require.NoError(t, r.Register(adapter))
+	r.RegisterGVR(gvr, adapter)
+	assert.NotNil(t, r.ForGVR(gvr))
+
+	r.UnregisterGVR(gvr)
+	assert.Nil(t, r.ForGVR(gvr))
+	assert.Nil(t, r.ForGroup("test.io"), "group map should be cleaned up")
+}
+
+func TestUnregisterGVR_PreservesOtherGVRsInGroup(t *testing.T) {
+	r := NewRegistry()
+	gvr1 := schema.GroupVersionResource{Group: "shared.io", Version: "v1", Resource: "foos"}
+	gvr2 := schema.GroupVersionResource{Group: "shared.io", Version: "v1", Resource: "bars"}
+	adapter := &fakeAdapter{name: "multi", gvrs: nil}
+
+	require.NoError(t, r.Register(adapter))
+	r.RegisterGVR(gvr1, adapter)
+	r.RegisterGVR(gvr2, adapter)
+
+	r.UnregisterGVR(gvr1)
+	assert.Nil(t, r.ForGVR(gvr1))
+	assert.NotNil(t, r.ForGVR(gvr2), "other GVR in same group should remain")
+	assert.NotNil(t, r.ForGroup("shared.io"), "group map should survive if other GVRs remain")
+}
+
+func TestUnregister_CleansUpDynamicGVRs(t *testing.T) {
+	r := NewRegistry()
+	adapter := &fakeAdapter{name: "dynamic", gvrs: nil} // no static Handles
+	require.NoError(t, r.Register(adapter))
+
+	// Dynamically register GVRs
+	gvr1 := schema.GroupVersionResource{Group: "dyn.io", Version: "v1", Resource: "foos"}
+	gvr2 := schema.GroupVersionResource{Group: "dyn.io", Version: "v1", Resource: "bars"}
+	r.RegisterGVR(gvr1, adapter)
+	r.RegisterGVR(gvr2, adapter)
+	assert.NotNil(t, r.ForGVR(gvr1))
+	assert.NotNil(t, r.ForGVR(gvr2))
+
+	// Unregister should clean up dynamically added GVRs too
+	err := r.Unregister("dynamic")
+	require.NoError(t, err)
+	assert.Nil(t, r.ForGVR(gvr1), "dynamically registered GVR should be cleaned up")
+	assert.Nil(t, r.ForGVR(gvr2), "dynamically registered GVR should be cleaned up")
+	assert.Nil(t, r.ForGroup("dyn.io"), "group should be cleaned up")
+}
+
 func TestRegister_NoGVRs(t *testing.T) {
 	r := NewRegistry()
 	adapter := &fakeAdapter{

@@ -146,6 +146,32 @@ func (idx *Indexer) BySourceGVR(gvr schema.GroupVersionResource) []types.Constra
 	return result
 }
 
+// DeleteBySource removes all constraints originating from the given GVR.
+// Used when a ConstraintProfile is deleted to clean up stale constraints.
+func (idx *Indexer) DeleteBySource(gvr schema.GroupVersionResource) int {
+	idx.mu.Lock()
+	var toDelete []k8stypes.UID
+	for uid, c := range idx.byUID {
+		if c.Source == gvr {
+			toDelete = append(toDelete, uid)
+		}
+	}
+	deleted := make([]types.Constraint, 0, len(toDelete))
+	for _, uid := range toDelete {
+		c := idx.byUID[uid]
+		delete(idx.byUID, uid)
+		deleted = append(deleted, c)
+	}
+	idx.mu.Unlock()
+
+	if idx.onChange != nil {
+		for _, c := range deleted {
+			idx.onChange(IndexEvent{Type: "delete", Constraint: c})
+		}
+	}
+	return len(toDelete)
+}
+
 // All returns all stored constraints (copy of the slice).
 func (idx *Indexer) All() []types.Constraint {
 	idx.mu.RLock()

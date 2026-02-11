@@ -267,6 +267,36 @@ type ConstraintProfileSpec struct {
 	// DebounceSeconds overrides the default debounce interval for notifications.
 	// +optional
 	DebounceSeconds *int `json:"debounceSeconds,omitempty"`
+
+	// FieldPaths configures custom extraction paths for the generic adapter.
+	// Only used when Adapter is "generic". Each path is dot-delimited
+	// (e.g., "spec.workloadSelector").
+	// +optional
+	FieldPaths *FieldPaths `json:"fieldPaths,omitempty"`
+}
+
+// FieldPaths configures how the generic adapter extracts constraint data from
+// arbitrary CRDs. Each field is a dot-delimited path into the object's structure.
+type FieldPaths struct {
+	// SelectorPath is the path to the workload label selector.
+	// Example: "spec.workloadSelector"
+	// +optional
+	SelectorPath string `json:"selectorPath,omitempty"`
+
+	// NamespaceSelectorPath is the path to the namespace label selector.
+	// Example: "spec.namespaceSelector"
+	// +optional
+	NamespaceSelectorPath string `json:"namespaceSelectorPath,omitempty"`
+
+	// EffectPath is the path to the effect/action field.
+	// Example: "spec.action"
+	// +optional
+	EffectPath string `json:"effectPath,omitempty"`
+
+	// SummaryPath is the path to a human-readable description.
+	// Example: "spec.description"
+	// +optional
+	SummaryPath string `json:"summaryPath,omitempty"`
 }
 
 type GVRReference struct {
