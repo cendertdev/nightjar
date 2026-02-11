@@ -241,7 +241,7 @@ Pre-check whether a manifest would be blocked by constraints.
     {
       "expected_kind": "ServiceMonitor",
       "expected_api_version": "monitoring.coreos.com/v1",
-      "reason": "Workload has prometheus.io/scrape annotation",
+      "reason": "Workload has a port named metrics or http-metrics but no Prometheus monitor targets it",
       "severity": "Warning",
       "for_workload": "my-app"
     }

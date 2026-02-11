@@ -198,9 +198,12 @@ requirements:
 ```
 
 Detects missing resources like:
-- ServiceMonitor for workloads with `prometheus.io/scrape` annotation
+- ServiceMonitor for workloads with a `metrics` or `http-metrics` port
 - VirtualService for workloads with Istio sidecar
-- HorizontalPodAutoscaler for high-traffic deployments
+- PeerAuthentication for namespaces with Istio injection
+- ClusterIssuer/Issuer referenced by cert-manager annotations
+
+See [Missing Resource Detection](missing-resources/) for the full list of detection rules and how they work.
 
 ---
 

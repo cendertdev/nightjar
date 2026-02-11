@@ -165,4 +165,5 @@ The controller exposes Prometheus metrics on port 8080:
 
 - [Configuration](configuration/) - Helm values reference
 - [Adapters](adapters/) - Enable/disable policy engines
+- [Missing Resources](missing-resources/) - Detection of missing companion resources
 - [Notifications](notifications/) - Slack, webhooks, Events

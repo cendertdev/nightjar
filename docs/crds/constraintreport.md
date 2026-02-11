@@ -260,9 +260,11 @@ machineReadable:
 | `expectedKind` | string | Kind that should exist |
 | `expectedAPIVersion` | string | API version |
 | `reason` | string | Why expected |
-| `severity` | enum | Warning, Info |
+| `severity` | enum | Warning, Critical |
 | `forWorkload` | WorkloadReference | Which workload needs it |
 | `remediation` | RemediationInfo | How to create it |
+
+See [Missing Resource Detection](/nightjar/controller/missing-resources/) for the full list of built-in detection rules.
 
 ---
 
