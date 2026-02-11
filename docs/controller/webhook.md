@@ -266,9 +266,9 @@ Webhook  ──GET /api/v1/constraints?namespace=<ns>──▶  Controller
 
 - The webhook queries the controller on each admission request
 - The query includes the workload's namespace; the controller returns matching constraints
-- A **3-second context timeout** is applied to each query (separate from the 5-second API server timeout)
+- A **3-second context timeout** is applied to each query; the HTTP client has a 5-second fallback timeout
 - If the controller is unavailable, the webhook fails open (allows the request, no warnings)
-- The HTTP client uses connection pooling (10 idle connections, 90s idle timeout)
+- The HTTP client uses connection pooling (10 idle connections per host, 90s idle timeout)
 
 ---
 
