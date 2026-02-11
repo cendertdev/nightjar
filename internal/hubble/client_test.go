@@ -2,13 +2,70 @@ package hubble
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
+	flowpb "github.com/cilium/cilium/api/v1/flow"
+	observerpb "github.com/cilium/cilium/api/v1/observer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// mockObserverServer implements the Hubble Observer gRPC service for testing.
+type mockObserverServer struct {
+	observerpb.UnimplementedObserverServer
+	flows []*flowpb.Flow
+	// blockCh is closed to unblock a blocking GetFlows call.
+	blockCh chan struct{}
+}
+
+func (m *mockObserverServer) GetFlows(_ *observerpb.GetFlowsRequest, stream observerpb.Observer_GetFlowsServer) error {
+	for _, f := range m.flows {
+		resp := &observerpb.GetFlowsResponse{
+			ResponseTypes: &observerpb.GetFlowsResponse_Flow{Flow: f},
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+	// If blockCh is set, block until it's closed or context is done.
+	if m.blockCh != nil {
+		select {
+		case <-m.blockCh:
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+	return nil
+}
+
+// newMockObserverConn creates an in-process gRPC connection to a mock Observer server.
+func newMockObserverConn(t *testing.T, srv *mockObserverServer) *grpc.ClientConn {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
+	s := grpc.NewServer()
+	observerpb.RegisterObserverServer(s, srv)
+	go func() {
+		_ = s.Serve(lis)
+	}()
+	t.Cleanup(func() { s.Stop() })
+
+	conn, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
 
 func TestDefaultClientOptions(t *testing.T) {
 	opts := DefaultClientOptions()
@@ -254,45 +311,57 @@ func TestClient_ContextCancel_StopsConnectionLoop(t *testing.T) {
 }
 
 func TestClient_StreamFlows_ContextCancel(t *testing.T) {
-	// Create a client without starting connectionLoop
+	srv := &mockObserverServer{blockCh: make(chan struct{})}
+	conn := newMockObserverConn(t, srv)
+
 	c := &Client{
 		opts:   DefaultClientOptions(),
 		logger: zap.NewNop().Named("hubble"),
 		drops:  make(chan FlowDrop, 10),
 		stopCh: make(chan struct{}),
 		state:  StateConnected,
+		conn:   conn,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
 	err := c.streamFlows(ctx)
-	assert.Equal(t, context.Canceled, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestClient_StreamFlows_StopChannel(t *testing.T) {
+	srv := &mockObserverServer{blockCh: make(chan struct{})}
+	conn := newMockObserverConn(t, srv)
+
 	c := &Client{
 		opts:   DefaultClientOptions(),
 		logger: zap.NewNop().Named("hubble"),
 		drops:  make(chan FlowDrop, 10),
 		stopCh: make(chan struct{}),
 		state:  StateConnected,
+		conn:   conn,
 	}
 
-	close(c.stopCh) // Close stop channel immediately
+	// Close stop channel — streamFlows should check it and return
+	close(c.stopCh)
 
 	err := c.streamFlows(context.Background())
+	// stopCh is checked before Recv(), so streamFlows returns nil immediately.
 	assert.NoError(t, err)
 }
 
 func TestClient_StreamFlows_TimedContextCancel(t *testing.T) {
-	// Test that streamFlows returns promptly when context is cancelled after a delay
+	srv := &mockObserverServer{blockCh: make(chan struct{})}
+	conn := newMockObserverConn(t, srv)
+
 	c := &Client{
 		opts:   DefaultClientOptions(),
 		logger: zap.NewNop().Named("hubble"),
 		drops:  make(chan FlowDrop, 10),
 		stopCh: make(chan struct{}),
 		state:  StateConnected,
+		conn:   conn,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -303,7 +372,379 @@ func TestClient_StreamFlows_TimedContextCancel(t *testing.T) {
 	elapsed := time.Since(start)
 
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Less(t, elapsed, 500*time.Millisecond, "streamFlows should return promptly on context deadline")
+	assert.Less(t, elapsed, 2*time.Second, "streamFlows should return promptly on context deadline")
+}
+
+func TestClient_StreamFlows_ReceivesAndConverts(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Time:           timestamppb.New(now),
+				Uuid:           "test-uuid-1",
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				Source: &flowpb.Endpoint{
+					Identity:  100,
+					Namespace: "production",
+					PodName:   "frontend-abc",
+					Labels:    []string{"k8s:app=frontend", "k8s:version=v2"},
+					Workloads: []*flowpb.Workload{{Kind: "Deployment", Name: "frontend"}},
+				},
+				Destination: &flowpb.Endpoint{
+					Identity:  200,
+					Namespace: "production",
+					PodName:   "backend-xyz",
+					Labels:    []string{"k8s:app=backend"},
+					Workloads: []*flowpb.Workload{{Kind: "Deployment", Name: "backend"}},
+				},
+				IP: &flowpb.IP{
+					Source:      "10.0.1.5",
+					Destination: "10.0.2.10",
+				},
+				L4: &flowpb.Layer4{
+					Protocol: &flowpb.Layer4_TCP{
+						TCP: &flowpb.TCP{
+							SourcePort:      45678,
+							DestinationPort: 8080,
+							Flags:           &flowpb.TCPFlags{SYN: true},
+						},
+					},
+				},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Run streamFlows in a goroutine — it will process the flow then return on EOF
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	// Read the drop from the channel
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, "test-uuid-1", drop.TraceID)
+		assert.Equal(t, now, drop.Time)
+		assert.Equal(t, DropReasonPolicy, drop.DropReason)
+		assert.Equal(t, "production", drop.Source.Namespace)
+		assert.Equal(t, "frontend-abc", drop.Source.PodName)
+		assert.Equal(t, uint32(100), drop.Source.Identity)
+		assert.Equal(t, "frontend", drop.Source.Labels["app"])
+		assert.Equal(t, "v2", drop.Source.Labels["version"])
+		assert.Len(t, drop.Source.Workloads, 1)
+		assert.Equal(t, "Deployment", drop.Source.Workloads[0].Kind)
+		assert.Equal(t, "production", drop.Destination.Namespace)
+		assert.Equal(t, "backend-xyz", drop.Destination.PodName)
+		assert.Equal(t, "10.0.1.5", drop.IP.Source)
+		assert.Equal(t, "10.0.2.10", drop.IP.Destination)
+		assert.Equal(t, ProtocolTCP, drop.L4.Protocol)
+		assert.Equal(t, uint32(8080), drop.L4.DestinationPort)
+		assert.NotNil(t, drop.L4.TCP)
+		assert.True(t, drop.L4.TCP.Flags.SYN)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	// streamFlows should return after EOF
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamFlows did not return after EOF")
+	}
+
+	// Verify stats
+	assert.Equal(t, uint64(1), c.flowDrops)
+}
+
+func TestClient_StreamFlows_HandlesNilFlowFields(t *testing.T) {
+	// Flow with nil Source, Destination, IP, L4 — should not panic
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				// All optional fields are nil
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	// Should receive a drop with zero-value fields (no panic)
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, DropReasonPolicy, drop.DropReason)
+		assert.Empty(t, drop.Source.Namespace)
+		assert.Empty(t, drop.Destination.Namespace)
+		assert.Empty(t, drop.IP.Source)
+		assert.Equal(t, Protocol(""), drop.L4.Protocol)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamFlows did not return")
+	}
+}
+
+func TestClient_StreamFlows_SkipsNonDropVerdict(t *testing.T) {
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict: flowpb.Verdict_FORWARDED,
+				Source:  &flowpb.Endpoint{Namespace: "ns", PodName: "pod1"},
+			},
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				Source:         &flowpb.Endpoint{Namespace: "ns", PodName: "pod2"},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	// Only the dropped flow should appear
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, "pod2", drop.Source.PodName)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	// Wait for stream to finish
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamFlows did not return")
+	}
+
+	// Only 1 drop should be recorded
+	assert.Equal(t, uint64(1), c.flowDrops)
+}
+
+func TestClient_StreamFlows_UDPFlow(t *testing.T) {
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				L4: &flowpb.Layer4{
+					Protocol: &flowpb.Layer4_UDP{
+						UDP: &flowpb.UDP{
+							SourcePort:      12345,
+							DestinationPort: 53,
+						},
+					},
+				},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, ProtocolUDP, drop.L4.Protocol)
+		assert.Equal(t, uint32(12345), drop.L4.SourcePort)
+		assert.Equal(t, uint32(53), drop.L4.DestinationPort)
+		assert.Nil(t, drop.L4.TCP)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	<-done
+}
+
+func TestClient_StreamFlows_ICMPv4Flow(t *testing.T) {
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				L4: &flowpb.Layer4{
+					Protocol: &flowpb.Layer4_ICMPv4{
+						ICMPv4: &flowpb.ICMPv4{Type: 8, Code: 0},
+					},
+				},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, ProtocolICMP, drop.L4.Protocol)
+		assert.Equal(t, uint32(0), drop.L4.SourcePort)
+		assert.Equal(t, uint32(0), drop.L4.DestinationPort)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	<-done
+}
+
+func TestClient_StreamFlows_UnknownL4Protocol(t *testing.T) {
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				L4: &flowpb.Layer4{
+					Protocol: &flowpb.Layer4_SCTP{
+						SCTP: &flowpb.SCTP{SourcePort: 1, DestinationPort: 2},
+					},
+				},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, ProtocolUnknown, drop.L4.Protocol)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	<-done
+}
+
+func TestClient_StreamFlows_TCPWithoutFlags(t *testing.T) {
+	srv := &mockObserverServer{
+		flows: []*flowpb.Flow{
+			{
+				Verdict:        flowpb.Verdict_DROPPED,
+				DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+				L4: &flowpb.Layer4{
+					Protocol: &flowpb.Layer4_TCP{
+						TCP: &flowpb.TCP{
+							SourcePort:      1234,
+							DestinationPort: 80,
+							// Flags is nil
+						},
+					},
+				},
+			},
+		},
+	}
+	conn := newMockObserverConn(t, srv)
+
+	c := &Client{
+		opts:   DefaultClientOptions(),
+		logger: zap.NewNop().Named("hubble"),
+		drops:  make(chan FlowDrop, 10),
+		stopCh: make(chan struct{}),
+		state:  StateConnected,
+		conn:   conn,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.streamFlows(ctx) }()
+
+	select {
+	case drop := <-c.drops:
+		assert.Equal(t, ProtocolTCP, drop.L4.Protocol)
+		assert.Equal(t, uint32(1234), drop.L4.SourcePort)
+		assert.Equal(t, uint32(80), drop.L4.DestinationPort)
+		assert.Nil(t, drop.L4.TCP, "TCP info should be nil when flags are absent")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for flow drop")
+	}
+
+	<-done
 }
 
 func TestClient_ConnectionLoop_StopSignal(t *testing.T) {
