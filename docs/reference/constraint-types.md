@@ -268,12 +268,12 @@ Traffic not being routed through mesh
 
 ### Example Constraint
 ```yaml
-name: missing-servicemonitor
+name: missing-prometheus-monitor-api-server
 type: MissingResource
 severity: Warning
 effect: missing
-summary: "No ServiceMonitor for workload with prometheus.io/scrape annotation"
-tags: [missing, prometheus, monitoring]
+summary: "Workload exposes a metrics port but has no ServiceMonitor or PodMonitor"
+tags: [prometheus, monitoring, missing-resource]
 ```
 
 ### Remediation Patterns

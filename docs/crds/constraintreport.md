@@ -165,7 +165,7 @@ machineReadable:
   missingResources:
     - expectedKind: "ServiceMonitor"
       expectedAPIVersion: "monitoring.coreos.com/v1"
-      reason: "Workload has prometheus.io/scrape annotation"
+      reason: "Workload has a port named metrics or http-metrics but no Prometheus monitor targets it"
       severity: "Warning"
       forWorkload:
         kind: "Deployment"
