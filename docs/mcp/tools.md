@@ -252,13 +252,37 @@ Pre-check whether a manifest would be blocked by constraints.
 }
 ```
 
+### Missing Prerequisites
+
+The `missing_prerequisites` array identifies companion resources that the workload needs but that don't exist in the cluster. For example, if a Deployment has a `prometheus.io/scrape: "true"` annotation but no corresponding `ServiceMonitor` exists, Nightjar detects this and includes it in the response.
+
+Built-in detection rules:
+
+| Rule | Trigger | Expected Resource |
+|------|---------|-------------------|
+| PrometheusMonitor | `prometheus.io/scrape` annotation or metrics port | `ServiceMonitor` |
+| IstioRouting | Istio sidecar injection | `VirtualService` |
+| IstioMTLS | Mesh membership | `PeerAuthentication` |
+| CertIssuer | TLS Secret references | `Certificate` / `Issuer` |
+
+Each entry includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `expected_kind` | string | Kind that should exist (e.g., `ServiceMonitor`) |
+| `expected_api_version` | string | API version (e.g., `monitoring.coreos.com/v1`) |
+| `reason` | string | Why this resource is expected |
+| `severity` | string | `Warning` or `Info` |
+| `for_workload` | string | Which workload needs it (e.g., `production/Deployment/my-app`) |
+| `remediation` | object | Steps to create the missing resource (when available) |
+
 ### Blocking Logic
 
 A manifest is marked as `would_block: true` when:
 - Any Admission constraint with Critical severity applies
 - The manifest matches the constraint's selector
 
-Non-blocking issues are returned as `warnings`.
+Non-blocking issues are returned as `warnings`. Missing prerequisites are informational and do not affect `would_block`.
 
 ---
 

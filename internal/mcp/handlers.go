@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 
 	"github.com/nightjarctl/nightjar/internal/indexer"
 	"github.com/nightjarctl/nightjar/internal/notifier"
+	"github.com/nightjarctl/nightjar/internal/requirements"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -21,6 +23,7 @@ type Handlers struct {
 	indexer            *indexer.Indexer
 	privacyResolver    PrivacyResolverFunc
 	remediationBuilder *notifier.RemediationBuilder
+	evaluator          *requirements.Evaluator
 }
 
 // NewHandlers creates a new Handlers instance.
@@ -29,12 +32,14 @@ func NewHandlers(
 	privacyResolver PrivacyResolverFunc,
 	defaultContact string,
 	logger *zap.Logger,
+	evaluator *requirements.Evaluator,
 ) *Handlers {
 	return &Handlers{
 		logger:             logger.Named("mcp-handlers"),
 		indexer:            idx,
 		privacyResolver:    privacyResolver,
 		remediationBuilder: notifier.NewRemediationBuilder(defaultContact),
+		evaluator:          evaluator,
 	}
 }
 
@@ -193,10 +198,26 @@ func (h *Handlers) HandleCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Evaluate missing prerequisites if evaluator is available.
+	var missingPrereqs []MissingResource
+	if h.evaluator != nil {
+		workloadObj := &unstructured.Unstructured{Object: manifest}
+		missingConstraints, err := h.evaluator.Evaluate(r.Context(), workloadObj)
+		if err != nil {
+			h.logger.Warn("Failed to evaluate missing prerequisites", zap.Error(err))
+		}
+		for _, mc := range missingConstraints {
+			missingPrereqs = append(missingPrereqs, constraintToMissingResource(mc, workloadObj, h.remediationBuilder))
+		}
+	}
+	if missingPrereqs == nil {
+		missingPrereqs = []MissingResource{}
+	}
+
 	response := CheckResult{
 		WouldBlock:           len(blockingConstraints) > 0,
 		BlockingConstraints:  blockingConstraints,
-		MissingPrerequisites: []MissingResource{}, // Placeholder - would need requirements evaluator
+		MissingPrerequisites: missingPrereqs,
 		Warnings:             warnings,
 	}
 
@@ -652,6 +673,59 @@ func severityOrder(severity string) int {
 	default:
 		return 3
 	}
+}
+
+// constraintToMissingResource converts a ConstraintTypeMissing constraint to an MCP MissingResource.
+func constraintToMissingResource(c types.Constraint, workload *unstructured.Unstructured, rb *notifier.RemediationBuilder) MissingResource {
+	mr := MissingResource{
+		Severity: string(c.Severity),
+	}
+
+	// Extract workload identity from the workload object itself (not the constraint).
+	if workload != nil {
+		kind := workload.GetKind()
+		name := workload.GetName()
+		ns := workload.GetNamespace()
+		if ns != "" {
+			mr.ForWorkload = ns + "/" + kind + "/" + name
+		} else {
+			mr.ForWorkload = kind + "/" + name
+		}
+	}
+
+	if c.Details != nil {
+		if v, ok := c.Details["expectedKind"].(string); ok {
+			mr.ExpectedKind = v
+		}
+		if v, ok := c.Details["expectedAPIVersion"].(string); ok {
+			mr.ExpectedAPIVersion = v
+		}
+		if v, ok := c.Details["reason"].(string); ok {
+			mr.Reason = v
+		}
+	}
+
+	if rb != nil {
+		remediation := rb.Build(c)
+		mr.Remediation = &RemediationResult{
+			Summary: remediation.Summary,
+		}
+		for _, step := range remediation.Steps {
+			mr.Remediation.Steps = append(mr.Remediation.Steps, RemediationStep{
+				Type:              step.Type,
+				Description:       step.Description,
+				Command:           step.Command,
+				Patch:             step.Patch,
+				Template:          step.Template,
+				URL:               step.URL,
+				Contact:           step.Contact,
+				RequiresPrivilege: step.RequiresPrivilege,
+				Automated:         step.Type == "kubectl" || step.Type == "annotation",
+			})
+		}
+	}
+
+	return mr
 }
 
 // genericSummary returns a generic summary for a constraint type.

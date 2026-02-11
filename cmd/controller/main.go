@@ -26,7 +26,9 @@ import (
 	"github.com/nightjarctl/nightjar/internal/correlator"
 	discoveryengine "github.com/nightjarctl/nightjar/internal/discovery"
 	"github.com/nightjarctl/nightjar/internal/indexer"
+	"github.com/nightjarctl/nightjar/internal/mcp"
 	"github.com/nightjarctl/nightjar/internal/notifier"
+	"github.com/nightjarctl/nightjar/internal/requirements"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -150,6 +152,31 @@ func main() {
 	annotator := notifier.NewWorkloadAnnotator(dynamicClient, idx, logger, annotatorOpts)
 	annotatorRef.Store(annotator)
 
+	// Build requirements evaluator context
+	evalCtx := requirements.NewDynamicEvalContext(dynamicClient)
+
+	// MCP evaluator: debounce=0 for immediate pre-check responses.
+	mcpEvaluator := requirements.NewEvaluator(idx, evalCtx, logger)
+	mcpEvaluator.SetDebounceDuration(0)
+	registerRequirementRules(mcpEvaluator)
+
+	// Report reconciler evaluator: default 120s debounce.
+	reconcilerEvaluator := requirements.NewEvaluator(idx, evalCtx, logger)
+	registerRequirementRules(reconcilerEvaluator)
+
+	// Build MCP server
+	mcpOpts := mcp.DefaultServerOptions()
+	mcpOpts.Logger = logger
+	mcpOpts.Evaluator = mcpEvaluator
+	mcpServer := mcp.NewServer(idx, mcpOpts)
+
+	// Build report reconciler
+	reconcilerOpts := notifier.DefaultReportReconcilerOptions()
+	reportReconciler := notifier.NewReportReconciler(
+		mgr.GetClient(), idx, logger, reconcilerOpts,
+		reconcilerEvaluator, dynamicClient,
+	)
+
 	// Setup signal handler context
 	ctx := ctrl.SetupSignalHandler()
 
@@ -195,6 +222,28 @@ func main() {
 		logger.Fatal("Failed to add dispatcher to manager", zap.Error(err))
 	}
 
+	// Add runnable to start MCP server
+	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
+		return mcpServer.Start(ctx)
+	}}); err != nil {
+		logger.Fatal("Failed to add MCP server to manager", zap.Error(err))
+	}
+
+	// Add runnable to start report reconciler
+	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
+		return reportReconciler.Start(ctx)
+	}}); err != nil {
+		logger.Fatal("Failed to add report reconciler to manager", zap.Error(err))
+	}
+
+	// Add runnable for evaluator cleanup
+	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
+		reconcilerEvaluator.StartCleanup(ctx)
+		return nil
+	}}); err != nil {
+		logger.Fatal("Failed to add evaluator cleanup to manager", zap.Error(err))
+	}
+
 	// Start manager (blocks until context is cancelled)
 	logger.Info("Starting manager")
 	if err := mgr.Start(ctx); err != nil {
@@ -203,6 +252,14 @@ func main() {
 
 	// Cleanup
 	engine.Stop()
+}
+
+// registerRequirementRules registers all built-in requirement rules on the evaluator.
+func registerRequirementRules(eval *requirements.Evaluator) {
+	eval.RegisterRule(requirements.NewPrometheusMonitorRule())
+	eval.RegisterRule(requirements.NewIstioRoutingRule())
+	eval.RegisterRule(requirements.NewIstioMTLSRule())
+	eval.RegisterRule(requirements.NewCertIssuerRule())
 }
 
 // mustRegister registers an adapter or exits on failure.

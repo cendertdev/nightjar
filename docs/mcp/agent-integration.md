@@ -8,7 +8,7 @@ nav_order: 3
 # Agent Integration Guide
 {: .no_toc }
 
-Connect AI coding assistants to Nightjar's MCP server.
+Connect AI coding assistants and custom agents to Nightjar.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -21,17 +21,78 @@ Connect AI coding assistants to Nightjar's MCP server.
 
 ## Overview
 
-Nightjar's MCP server enables AI assistants to help developers understand and resolve policy-related issues. This guide covers integration with popular AI tools.
+Nightjar exposes an HTTP API that follows MCP (Model Context Protocol) conventions. Tools are invoked via HTTP POST, resources are read via HTTP GET, and real-time updates stream over Server-Sent Events (SSE).
+
+| Endpoint Pattern | Method | Purpose |
+|-----------------|--------|---------|
+| `/tools/nightjar_*` | POST | Invoke tools (query, explain, check, remediate) |
+| `/resources/*` | GET | Read data (reports, constraints, health, capabilities) |
+| `/sse` | GET | Stream real-time constraint change events |
+| `/mcp/tools` | GET | Discover available tools with input schemas |
+| `/mcp/resources` | GET | Discover available resources |
+
+All requests and responses use JSON.
+
+---
+
+## Quick Start
+
+The fastest way to start using Nightjar from your local machine:
+
+```bash
+# Port-forward the MCP server
+kubectl port-forward -n nightjar-system svc/nightjar-controller 8090:8090
+
+# Query constraints in a namespace
+curl -s -X POST http://localhost:8090/tools/nightjar_query \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace": "production"}' | jq
+
+# Explain an error
+curl -s -X POST http://localhost:8090/tools/nightjar_explain \
+  -H 'Content-Type: application/json' \
+  -d '{"error_message": "connection refused to port 9090", "namespace": "my-app"}' | jq
+
+# Pre-check a manifest
+curl -s -X POST http://localhost:8090/tools/nightjar_check \
+  -H 'Content-Type: application/json' \
+  -d '{"manifest": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\n  namespace: production"}' | jq
+
+# Discover available tools
+curl -s http://localhost:8090/mcp/tools | jq
+
+# Read health status
+curl -s http://localhost:8090/resources/health | jq
+```
 
 ---
 
 ## Claude Desktop
 
-Claude Desktop can connect to MCP servers for enhanced capabilities.
+Claude Desktop connects to MCP servers for tool use during conversations.
 
-### Configuration
+### SSE Transport (Recommended)
 
-Add Nightjar to your Claude Desktop configuration:
+Start port forwarding, then add Nightjar to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```bash
+kubectl port-forward -n nightjar-system svc/nightjar-controller 8090:8090
+```
+
+```json
+{
+  "mcpServers": {
+    "nightjar": {
+      "url": "http://localhost:8090/sse",
+      "transport": "sse"
+    }
+  }
+}
+```
+
+### stdio Transport
+
+For stdio-based connections via kubectl:
 
 ```json
 {
@@ -41,30 +102,15 @@ Add Nightjar to your Claude Desktop configuration:
       "args": [
         "exec", "-i", "-n", "nightjar-system",
         "deployment/nightjar-controller", "--",
-        "/app/mcp-server"
+        "/app/mcp-server", "--transport=stdio"
       ]
     }
   }
 }
 ```
 
-Or with port forwarding:
-
-```json
-{
-  "mcpServers": {
-    "nightjar": {
-      "url": "http://localhost:8090/mcp",
-      "transport": "sse"
-    }
-  }
-}
-```
-
-Start port forwarding before connecting:
-```bash
-kubectl port-forward -n nightjar-system svc/nightjar-controller 8090:8090
-```
+{: .note }
+stdio transport requires the controller binary to support `--transport=stdio` mode. Check your Nightjar version for support.
 
 ### Example Conversation
 
@@ -95,108 +141,176 @@ Would you like me to help draft the exception request?
 
 ---
 
-## VS Code with Copilot
+## Claude Code
 
-GitHub Copilot can use MCP servers in VS Code.
+Claude Code can connect to Nightjar's MCP server for constraint-aware coding assistance.
 
-### Setup
+### Configuration
 
-1. Install the MCP extension for VS Code
-2. Add Nightjar server configuration:
+Add Nightjar to your project's `.mcp.json`:
 
 ```json
 {
-  "mcp.servers": {
+  "mcpServers": {
     "nightjar": {
       "type": "sse",
-      "url": "http://localhost:8090/mcp"
+      "url": "http://localhost:8090/sse"
     }
   }
 }
 ```
 
-3. Start port forwarding:
+Or start with a command:
+
+```bash
+claude mcp add nightjar --transport sse http://localhost:8090/sse
+```
+
+Then port-forward before starting Claude Code:
+
+```bash
+kubectl port-forward -n nightjar-system svc/nightjar-controller 8090:8090
+```
+
+---
+
+## VS Code with Copilot
+
+GitHub Copilot in VS Code can use MCP servers for context.
+
+### Setup
+
+1. Add Nightjar to your VS Code settings (`.vscode/settings.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "nightjar": {
+        "type": "sse",
+        "url": "http://localhost:8090/sse"
+      }
+    }
+  }
+}
+```
+
+2. Start port forwarding:
+
 ```bash
 kubectl port-forward -n nightjar-system svc/nightjar-controller 8090:8090
 ```
 
 ### Usage
 
-In VS Code, ask Copilot about deployment issues:
+Ask Copilot about deployment issues:
 
 ```
 @workspace Why is my deployment failing with admission webhook error?
 ```
 
-Copilot will use Nightjar's MCP tools to diagnose the issue.
+Copilot will use Nightjar's tools to diagnose the issue.
 
 ---
 
 ## Custom Agent Integration
 
-Build your own agent integration using the MCP protocol.
+Build your own integration using Nightjar's HTTP API.
+
+### Tool Discovery
+
+Agents can discover available tools and their schemas:
+
+```bash
+curl -s http://localhost:8090/mcp/tools | jq
+```
+
+Response:
+
+```json
+{
+  "tools": [
+    {
+      "name": "nightjar_query",
+      "description": "Query constraints affecting a namespace or workload",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": { "type": "string", "description": "Namespace to query" },
+          "workload_name": { "type": "string", "description": "Optional workload name filter" },
+          "constraint_type": { "type": "string", "description": "Optional constraint type filter" },
+          "severity": { "type": "string", "description": "Optional severity filter" },
+          "include_remediation": { "type": "boolean", "description": "Include remediation steps" }
+        },
+        "required": ["namespace"]
+      }
+    },
+    ...
+  ]
+}
+```
 
 ### Python Client
 
 ```python
 import httpx
-import json
 
 class NightjarClient:
-    def __init__(self, base_url="http://localhost:8090"):
-        self.base_url = base_url
-        self.client = httpx.Client()
+    """Client for Nightjar's HTTP API."""
+
+    def __init__(self, base_url="http://localhost:8090", token=None):
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self.client = httpx.Client(base_url=base_url, headers=headers)
+
+    def discover_tools(self):
+        """List available tools and their input schemas."""
+        return self.client.get("/mcp/tools").json()
 
     def query(self, namespace, **filters):
         """Query constraints in a namespace."""
-        params = {"namespace": namespace, **filters}
-        response = self.client.post(
-            f"{self.base_url}/tools/nightjar_query",
-            json=params
-        )
-        return response.json()
+        return self.client.post(
+            "/tools/nightjar_query",
+            json={"namespace": namespace, **filters}
+        ).json()
 
     def explain(self, error_message, namespace, workload_name=None):
-        """Explain an error message."""
-        params = {
-            "error_message": error_message,
-            "namespace": namespace
-        }
+        """Explain an error message by matching to constraints."""
+        params = {"error_message": error_message, "namespace": namespace}
         if workload_name:
             params["workload_name"] = workload_name
-
-        response = self.client.post(
-            f"{self.base_url}/tools/nightjar_explain",
-            json=params
-        )
-        return response.json()
+        return self.client.post("/tools/nightjar_explain", json=params).json()
 
     def check(self, manifest_yaml):
-        """Pre-check a manifest."""
-        response = self.client.post(
-            f"{self.base_url}/tools/nightjar_check",
+        """Pre-check a manifest for blocking constraints and missing prerequisites."""
+        return self.client.post(
+            "/tools/nightjar_check",
             json={"manifest": manifest_yaml}
-        )
-        return response.json()
+        ).json()
 
-    def get_health(self):
-        """Get controller health."""
-        response = self.client.get(
-            f"{self.base_url}/resources/health"
-        )
-        return response.json()
+    def remediation(self, constraint_name, namespace):
+        """Get remediation steps for a specific constraint."""
+        return self.client.post(
+            "/tools/nightjar_remediation",
+            json={"constraint_name": constraint_name, "namespace": namespace}
+        ).json()
+
+    def health(self):
+        """Get controller health status."""
+        return self.client.get("/resources/health").json()
+
+    def report(self, namespace):
+        """Get the full constraint report for a namespace."""
+        return self.client.get(f"/resources/reports/{namespace}").json()
 
 
 # Usage
 client = NightjarClient()
 
 # Query constraints
-result = client.query(
-    namespace="production",
-    constraint_type="NetworkEgress",
-    severity="Critical"
-)
-print(f"Found {result['total']} constraints")
+result = client.query(namespace="production", severity="Critical")
+print(f"Found {result['total']} critical constraints")
 
 # Explain an error
 explanation = client.explain(
@@ -204,78 +318,187 @@ explanation = client.explain(
     namespace="my-app"
 )
 print(f"Confidence: {explanation['confidence']}")
-print(f"Explanation: {explanation['explanation']}")
+for c in explanation["matching_constraints"]:
+    print(f"  - {c['name']}: {c['remediation']['summary']}")
+
+# Pre-check a deployment manifest
+check = client.check(open("deployment.yaml").read())
+if check["would_block"]:
+    print("Deployment would be BLOCKED:")
+    for c in check["blocking_constraints"]:
+        print(f"  - {c['name']}: {c['remediation']['summary']}")
+if check.get("missing_prerequisites"):
+    print("Missing prerequisites:")
+    for mp in check["missing_prerequisites"]:
+        print(f"  - {mp['expected_kind']}: {mp['reason']}")
 ```
 
 ### TypeScript Client
 
 ```typescript
+interface Constraint {
+  name: string;
+  constraint_type: string;
+  severity: "Critical" | "Warning" | "Info";
+  effect: string;
+  source_kind: string;
+  remediation?: {
+    summary: string;
+    steps: RemediationStep[];
+  };
+}
+
+interface RemediationStep {
+  type: "manual" | "kubectl" | "annotation" | "yaml_patch" | "link";
+  description: string;
+  command?: string;
+  contact?: string;
+  url?: string;
+  requires_privilege?: string;
+  automated: boolean;
+}
+
 interface QueryResult {
   namespace: string;
   constraints: Constraint[];
   total: number;
 }
 
-interface ExplainResult {
-  explanation: string;
-  confidence: 'high' | 'medium' | 'low';
-  matching_constraints: Constraint[];
-  remediation_steps: RemediationStep[];
+interface CheckResult {
+  would_block: boolean;
+  blocking_constraints: Constraint[];
+  missing_prerequisites: MissingPrerequisite[];
+  warnings: string[];
+}
+
+interface MissingPrerequisite {
+  expected_kind: string;
+  expected_api_version: string;
+  reason: string;
+  severity: string;
+  for_workload: string;
+  remediation?: {
+    summary: string;
+    steps: RemediationStep[];
+  };
 }
 
 class NightjarClient {
-  constructor(private baseUrl: string = 'http://localhost:8090') {}
+  constructor(
+    private baseUrl: string = "http://localhost:8090",
+    private token?: string
+  ) {}
 
-  async query(
-    namespace: string,
-    filters?: {
-      constraintType?: string;
-      severity?: string;
-      workloadName?: string;
-    }
-  ): Promise<QueryResult> {
-    const response = await fetch(
-      `${this.baseUrl}/tools/nightjar_query`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ namespace, ...filters })
-      }
-    );
+  private async post<T>(path: string, body: object): Promise<T> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
+
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
     return response.json();
   }
 
-  async explain(
-    errorMessage: string,
-    namespace: string,
-    workloadName?: string
-  ): Promise<ExplainResult> {
-    const response = await fetch(
-      `${this.baseUrl}/tools/nightjar_explain`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          error_message: errorMessage,
-          namespace,
-          workload_name: workloadName
-        })
-      }
-    );
+  private async get<T>(path: string): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
+
+    const response = await fetch(`${this.baseUrl}${path}`, { headers });
     return response.json();
+  }
+
+  /** Discover available tools and their input schemas. */
+  discoverTools() {
+    return this.get<{ tools: object[] }>("/mcp/tools");
+  }
+
+  /** Query constraints in a namespace. */
+  query(namespace: string, filters?: Partial<Record<string, string>>) {
+    return this.post<QueryResult>("/tools/nightjar_query", {
+      namespace,
+      ...filters,
+    });
+  }
+
+  /** Explain an error by matching to constraints. */
+  explain(errorMessage: string, namespace: string, workloadName?: string) {
+    return this.post<{
+      explanation: string;
+      confidence: "high" | "medium" | "low";
+      matching_constraints: Constraint[];
+    }>("/tools/nightjar_explain", {
+      error_message: errorMessage,
+      namespace,
+      workload_name: workloadName,
+    });
+  }
+
+  /** Pre-check a manifest for blocking constraints and missing prerequisites. */
+  check(manifestYaml: string) {
+    return this.post<CheckResult>("/tools/nightjar_check", {
+      manifest: manifestYaml,
+    });
+  }
+
+  /** Get a namespace constraint report. */
+  report(namespace: string) {
+    return this.get<object>(`/resources/reports/${namespace}`);
   }
 }
 
 // Usage
 const client = new NightjarClient();
 
-const result = await client.explain(
-  'connection refused to database:5432',
-  'my-app'
-);
+const check = await client.check(manifestYaml);
+if (check.would_block) {
+  console.error("Deployment would be blocked:");
+  check.blocking_constraints.forEach((c) =>
+    console.error(`  ${c.name}: ${c.remediation?.summary}`)
+  );
+}
+if (check.missing_prerequisites.length > 0) {
+  console.warn("Missing prerequisites:");
+  check.missing_prerequisites.forEach((mp) =>
+    console.warn(`  ${mp.expected_kind}: ${mp.reason}`)
+  );
+}
+```
 
-if (result.confidence === 'high') {
-  console.log('Found likely cause:', result.matching_constraints[0].name);
+---
+
+## SSE Event Streaming
+
+Subscribe to real-time constraint changes via the `/sse` endpoint:
+
+```python
+import httpx
+
+with httpx.stream("GET", "http://localhost:8090/sse") as response:
+    for line in response.iter_lines():
+        if line.startswith("data: "):
+            import json
+            event = json.loads(line[6:])
+            print(f"Constraint {event['type']}: {event['data']['constraintName']} "
+                  f"in {event['data']['namespace']}")
+```
+
+Events are broadcast when constraints are added, updated, or removed. Each event includes:
+
+```json
+{
+  "type": "constraint_change",
+  "data": {
+    "type": "added",
+    "constraintUID": "abc123",
+    "constraintName": "restrict-egress",
+    "namespace": "production",
+    "constraintType": "NetworkEgress",
+    "severity": "Critical"
+  }
 }
 ```
 
@@ -283,7 +506,7 @@ if (result.confidence === 'high') {
 
 ## In-Cluster Agent
 
-For agents running inside the cluster, use Kubernetes ServiceAccount authentication.
+For agents running inside the cluster, connect directly to the Nightjar service using Kubernetes ServiceAccount authentication.
 
 ### ServiceAccount Setup
 
@@ -308,77 +531,51 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ```
 
-### Accessing MCP from Pod
+### Connecting from a Pod
 
 ```python
-import os
 import httpx
 
-# Get ServiceAccount token
-token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-with open(token_path) as f:
+# Read the ServiceAccount token
+with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
     token = f.read()
 
-# Connect to Nightjar
-client = httpx.Client(
+# Connect directly to the Nightjar service (no port-forward needed)
+client = NightjarClient(
     base_url="http://nightjar-controller.nightjar-system.svc:8090",
-    headers={"Authorization": f"Bearer {token}"}
+    token=token
 )
 
-# Make requests
-response = client.post(
-    "/tools/nightjar_query",
-    json={"namespace": "my-app"}
-)
+# Query constraints in the agent's own namespace
+result = client.query(namespace="my-app")
 ```
 
 ---
 
-## LangChain Integration
+## CI/CD Integration
 
-Use Nightjar as a LangChain tool.
+Use Nightjar's pre-check in CI pipelines to catch constraint issues before deployment:
 
-```python
-from langchain.tools import Tool
-from langchain.agents import initialize_agent
+```yaml
+# GitHub Actions example
+- name: Pre-check deployment
+  run: |
+    RESULT=$(curl -s -X POST http://nightjar:8090/tools/nightjar_check \
+      -H 'Content-Type: application/json' \
+      -d "{\"manifest\": $(cat deploy/manifest.yaml | jq -Rs .)}")
 
-class NightjarTools:
-    def __init__(self, client):
-        self.client = client
+    WOULD_BLOCK=$(echo "$RESULT" | jq -r '.would_block')
+    if [ "$WOULD_BLOCK" = "true" ]; then
+      echo "Deployment would be blocked:"
+      echo "$RESULT" | jq '.blocking_constraints[].name'
+      exit 1
+    fi
 
-    def query_tool(self):
-        return Tool(
-            name="nightjar_query",
-            description="Query Kubernetes constraints in a namespace",
-            func=lambda input: self.client.query(
-                namespace=input.get("namespace"),
-                **input
-            )
-        )
-
-    def explain_tool(self):
-        return Tool(
-            name="nightjar_explain",
-            description="Explain a Kubernetes error by matching to constraints",
-            func=lambda input: self.client.explain(
-                error_message=input["error"],
-                namespace=input["namespace"]
-            )
-        )
-
-# Usage with LangChain agent
-client = NightjarClient()
-tools = NightjarTools(client)
-
-agent = initialize_agent(
-    tools=[tools.query_tool(), tools.explain_tool()],
-    llm=your_llm,
-    agent="zero-shot-react-description"
-)
-
-response = agent.run(
-    "Why is my pod in the production namespace failing with 'connection refused'?"
-)
+    MISSING=$(echo "$RESULT" | jq '.missing_prerequisites | length')
+    if [ "$MISSING" -gt 0 ]; then
+      echo "Warning: missing prerequisites:"
+      echo "$RESULT" | jq -r '.missing_prerequisites[] | "  \(.expected_kind): \(.reason)"'
+    fi
 ```
 
 ---
@@ -394,25 +591,36 @@ kubectl get deployment -n nightjar-system nightjar-controller -o yaml | grep -A5
 # Check pod is running
 kubectl get pods -n nightjar-system -l app=nightjar-controller
 
-# Check service
+# Check service exists
 kubectl get svc -n nightjar-system nightjar-controller
+
+# Test connectivity from inside the cluster
+kubectl exec -it -n nightjar-system deployment/nightjar-controller -- \
+  curl -s http://localhost:8090/resources/health
 ```
 
 ### Authentication Errors
 
 ```bash
-# Test with curl
-kubectl exec -it -n nightjar-system deployment/nightjar-controller -- \
-  curl -s http://localhost:8090/resources/health
+# Verify your ServiceAccount has the right role
+kubectl auth can-i get constraintreports --as=system:serviceaccount:my-app:my-agent
+
+# Test with a token
+TOKEN=$(kubectl create token my-agent -n my-app)
+curl -s http://localhost:8090/resources/health \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Empty Results
 
 ```bash
-# Verify constraints exist
+# Verify constraints exist in the cluster
 kubectl get constraintreports -A
 
-# Check controller logs
+# Check the indexer has data
+curl -s http://localhost:8090/resources/capabilities | jq '.totalConstraints'
+
+# Check controller logs for errors
 kubectl logs -n nightjar-system -l app=nightjar-controller | grep -i mcp
 ```
 
@@ -422,21 +630,23 @@ kubectl logs -n nightjar-system -l app=nightjar-controller | grep -i mcp
 
 ### For Agent Developers
 
-1. **Handle confidence levels**: Don't present low-confidence matches with certainty
-2. **Include remediation**: Always show remediation steps when available
-3. **Respect privacy**: Don't cache or log cross-namespace details
-4. **Rate limit requests**: Avoid overwhelming the MCP server
+1. **Start with tool discovery**: Call `GET /mcp/tools` to see available tools and their schemas
+2. **Handle confidence levels**: Don't present low-confidence matches with certainty
+3. **Show remediation steps**: Always surface remediation when available — it's the most actionable part
+4. **Use pre-check proactively**: Call `nightjar_check` before deploying to catch issues early
+5. **Check `missing_prerequisites`**: Pre-check results include missing companion resources, not just blocking constraints
+6. **Respect privacy**: Don't cache or log cross-namespace constraint details
 
 ### For Platform Teams
 
-1. **Enable MCP in production**: Set `mcp.enabled: true`
-2. **Configure authentication**: Use `kubernetes-sa` for in-cluster agents
-3. **Set remediation contacts**: Fill in `privacy.remediationContact`
-4. **Monitor usage**: Check MCP request metrics
+1. **Enable MCP in production**: Set `mcp.enabled: true` in your Helm values
+2. **Configure authentication**: Use `kubernetes-sa` for in-cluster agents, `bearer-token` for external
+3. **Set remediation contacts**: Fill in `privacy.remediationContact` so developers know who to ask
+4. **Monitor usage**: Check MCP request metrics via the Prometheus endpoint
 
 ### Security Considerations
 
-1. MCP respects RBAC—agents see only what their ServiceAccount allows
+1. MCP respects RBAC — agents see only what their ServiceAccount allows
 2. Cross-namespace constraint names are redacted by default
 3. Sensitive policy details (Rego source, webhook URLs) are never exposed
-4. Use network policies to restrict MCP access if needed
+4. Use network policies to restrict which pods can reach the MCP port
