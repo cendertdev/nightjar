@@ -16,7 +16,22 @@ The `nightjar` command-line tool queries constraints and explains errors.
 
 ## Installation
 
+### Download Binary
+
+Pre-built binaries are available from [GitHub Releases](https://github.com/cendertdev/nightjar/releases):
+
+```bash
+# Linux amd64
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
+```
+
+See the [Installation Guide](/nightjar/getting-started/installation/#cli-installation) for macOS, Windows, and other platforms.
+
 ### Using Go
+
+Requires Go 1.21+.
 
 ```bash
 go install github.com/nightjarctl/nightjar/cmd/nightjarctl@latest
