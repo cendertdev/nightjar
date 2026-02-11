@@ -84,6 +84,14 @@ The table below lists the most commonly configured parameters. See the [full con
 | `adapters.istio.enabled` | `auto` | Istio adapter |
 | `adapters.prometheus.enabled` | `auto` | Prometheus adapter |
 
+### Discovery
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `discovery.additionalPolicyGroups` | `[]` | Additional API groups to treat as policy sources (beyond built-in groups) |
+| `discovery.additionalPolicyNameHints` | `[]` | Additional resource name substrings for heuristic policy detection |
+| `discovery.checkCRDAnnotations` | `true` | Check CRDs for `nightjar.io/is-policy` annotation during discovery scan |
+
 ### Notifications
 
 | Parameter | Default | Description |
@@ -156,6 +164,17 @@ mcp:
 hubble:
   enabled: true
   relayAddress: hubble-relay.kube-system.svc:4245
+```
+
+### Custom policy discovery
+
+```yaml
+discovery:
+  additionalPolicyGroups:
+    - "custom.example.com"
+  additionalPolicyNameHints:
+    - "compliance"
+  checkCRDAnnotations: true
 ```
 
 ### Production configuration
