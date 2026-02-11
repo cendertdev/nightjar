@@ -6,7 +6,7 @@
 | ------- | ------------------ |
 | 0.x.x   | :white_check_mark: |
 
-As a pre-alpha project, we support the latest release only. Once we reach 1.0, we will maintain security patches for the current and previous minor versions.
+As an alpha project, we support the latest release only. Once we reach 1.0, we will maintain security patches for the current and previous minor versions.
 
 ## Reporting a Vulnerability
 

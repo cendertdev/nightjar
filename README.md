@@ -85,7 +85,7 @@ Separate Deployment:
 ## Quick Start
 
 ```bash
-helm repo add nightjar https://yourorg.github.io/nightjar
+helm repo add nightjar https://nightjarctl.github.io/charts
 helm install nightjar nightjar/nightjar \
   --namespace nightjar-system \
   --create-namespace
@@ -98,7 +98,7 @@ kubectl get constraintreports -n my-namespace
 
 ## Project Status
 
-🚧 **Pre-alpha / Planning** — See [PROJECT_PLAN.md](docs/PROJECT_PLAN.md) for the phased delivery roadmap.
+🚀 **Alpha** — Core discovery, 8 policy adapters (Cilium, Gatekeeper, Kyverno, NetworkPolicy, ResourceQuota, LimitRange, Webhooks, Generic), correlation engine, notification system, MCP server, CLI, admission webhook, and requirements evaluator are implemented and tested. See [PROJECT_PLAN.md](docs/PROJECT_PLAN.md) for the roadmap.
 
 ## Agent & Automation Interfaces
 
@@ -118,10 +118,24 @@ See [Agent Outputs](docs/AGENT_OUTPUTS.md) for full design documentation.
 
 ## Documentation
 
+**Getting Started**
+- [Installation](docs/getting-started/installation.md) — Helm, binary, and source install options
+- [Quickstart](docs/getting-started/quickstart.md) — 5-minute hands-on tutorial
+
+**Usage**
+- [CLI Reference](docs/cli/) — nightjar query, explain, check, remediate, and status commands
+- [MCP Server](docs/mcp/) — AI agent integration with tools and resources
+- [CRD Reference](docs/crds/) — ConstraintReport, ConstraintProfile, NotificationPolicy
+
+**Reference**
 - [Architecture](docs/ARCHITECTURE.md) — Deployment model, component design, data flow
+- [Constraint Types](docs/reference/constraint-types.md) — Network, Admission, Resource, Mesh, and Missing constraint categories
+- [Severity Levels](docs/reference/severity-levels.md) — Critical, Warning, and Info definitions
 - [Agent Outputs](docs/AGENT_OUTPUTS.md) — MCP server, structured events, machine-readable CRDs, kubectl plugin
-- [Project Plan](docs/PROJECT_PLAN.md) — Phased delivery timeline and milestones
 - [Privacy Model](docs/PRIVACY_MODEL.md) — Information classification and notification scoping
+- [Adapters](docs/controller/adapters.md) — Supported policy engines and adapter details
+- [Notifications](docs/controller/notifications.md) — Event, report, and annotation notification system
+- [Configuration](docs/controller/configuration.md) — Controller and webhook configuration options
 - [Adapter Guide](docs/ADAPTER_GUIDE.md) — How to write a constraint adapter for a new policy engine
 - [Helm Chart](deploy/helm/README.md) — Helm chart documentation and values reference
 - [Examples](examples/) — Standalone YAML manifests for trying out Nightjar
