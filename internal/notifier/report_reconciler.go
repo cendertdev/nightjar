@@ -9,11 +9,14 @@ import (
 
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nightjarctl/nightjar/api/v1alpha1"
 	"github.com/nightjarctl/nightjar/internal/indexer"
+	"github.com/nightjarctl/nightjar/internal/requirements"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
 
@@ -46,6 +49,8 @@ type ReportReconciler struct {
 	client             client.Client
 	idx                *indexer.Indexer
 	remediationBuilder *RemediationBuilder
+	evaluator          *requirements.Evaluator
+	dynamicClient      dynamic.Interface
 	opts               ReportReconcilerOptions
 
 	mu              sync.Mutex
@@ -54,11 +59,14 @@ type ReportReconciler struct {
 }
 
 // NewReportReconciler creates a new ReportReconciler.
+// evaluator and dynClient may be nil; missing-resource detection is skipped if either is nil.
 func NewReportReconciler(
 	k8sClient client.Client,
 	idx *indexer.Indexer,
 	logger *zap.Logger,
 	opts ReportReconcilerOptions,
+	evaluator *requirements.Evaluator,
+	dynClient dynamic.Interface,
 ) *ReportReconciler {
 	if opts.DebounceDuration == 0 {
 		opts.DebounceDuration = 10 * time.Second
@@ -72,6 +80,8 @@ func NewReportReconciler(
 		client:             k8sClient,
 		idx:                idx,
 		remediationBuilder: NewRemediationBuilder(opts.DefaultContact),
+		evaluator:          evaluator,
+		dynamicClient:      dynClient,
 		opts:               opts,
 		lastReconcile:      make(map[string]time.Time),
 		pendingTriggers:    make(map[string]bool),
@@ -254,15 +264,17 @@ func (rr *ReportReconciler) buildReportStatus(constraints []types.Constraint, na
 
 	status.Constraints = entries
 
+	// Evaluate missing resources if evaluator is available.
+	missingResources := rr.evaluateMissingResources(namespace)
+
 	// Build machine-readable section
 	status.MachineReadable = &v1alpha1.MachineReadableReport{
-		SchemaVersion: "1",
-		GeneratedAt:   now,
-		DetailLevel:   string(rr.opts.DefaultDetailLevel),
-		Constraints:   machineEntries,
-		Tags:          allTags,
-		// MissingResources is populated by the requirements evaluator (placeholder for now)
-		MissingResources: []v1alpha1.MissingResourceEntry{},
+		SchemaVersion:    "1",
+		GeneratedAt:      now,
+		DetailLevel:      string(rr.opts.DefaultDetailLevel),
+		Constraints:      machineEntries,
+		Tags:             allTags,
+		MissingResources: missingResources,
 	}
 
 	return status
@@ -373,6 +385,96 @@ func severityOrder(severity string) int {
 	default:
 		return 3
 	}
+}
+
+// workloadGVRs are the GVRs scanned when evaluating missing resources per namespace.
+var workloadGVRs = []schema.GroupVersionResource{
+	{Group: "apps", Version: "v1", Resource: "deployments"},
+	{Group: "apps", Version: "v1", Resource: "statefulsets"},
+	{Group: "apps", Version: "v1", Resource: "daemonsets"},
+}
+
+const (
+	evaluateTimeout          = 5 * time.Second
+	maxWorkloadsPerReconcile = 100
+)
+
+// evaluateMissingResources runs the requirements evaluator over workloads in the
+// namespace and returns MissingResourceEntry items for the report. Returns an empty
+// slice (never nil) so the CRD always has the field present.
+func (rr *ReportReconciler) evaluateMissingResources(namespace string) []v1alpha1.MissingResourceEntry {
+	if rr.evaluator == nil || rr.dynamicClient == nil {
+		return []v1alpha1.MissingResourceEntry{}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), evaluateTimeout)
+	defer cancel()
+
+	var allMissing []v1alpha1.MissingResourceEntry
+
+	for _, gvr := range workloadGVRs {
+		list, err := rr.dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+			Limit: maxWorkloadsPerReconcile,
+		})
+		if err != nil {
+			rr.logger.Warn("Failed to list workloads for missing-resource evaluation",
+				zap.String("namespace", namespace),
+				zap.String("gvr", gvr.String()),
+				zap.Error(err))
+			continue
+		}
+
+		for i := range list.Items {
+			workload := &list.Items[i]
+			constraints, err := rr.evaluator.Evaluate(ctx, workload)
+			if err != nil {
+				rr.logger.Debug("Failed to evaluate workload",
+					zap.String("workload", workload.GetName()),
+					zap.Error(err))
+				continue
+			}
+			for _, c := range constraints {
+				allMissing = append(allMissing, constraintToMissingResourceEntry(c, workload, rr.remediationBuilder))
+			}
+		}
+	}
+
+	if allMissing == nil {
+		return []v1alpha1.MissingResourceEntry{}
+	}
+	return allMissing
+}
+
+// constraintToMissingResourceEntry converts a ConstraintTypeMissing constraint to a CRD MissingResourceEntry.
+func constraintToMissingResourceEntry(c types.Constraint, workload *unstructured.Unstructured, rb *RemediationBuilder) v1alpha1.MissingResourceEntry {
+	entry := v1alpha1.MissingResourceEntry{
+		Severity: string(c.Severity),
+	}
+
+	if workload != nil {
+		entry.ForWorkload = v1alpha1.WorkloadReference{
+			Kind: workload.GetKind(),
+			Name: workload.GetName(),
+		}
+	}
+
+	if c.Details != nil {
+		if v, ok := c.Details["expectedKind"].(string); ok {
+			entry.ExpectedKind = v
+		}
+		if v, ok := c.Details["expectedAPIVersion"].(string); ok {
+			entry.ExpectedAPIVersion = v
+		}
+		if v, ok := c.Details["reason"].(string); ok {
+			entry.Reason = v
+		}
+	}
+
+	if rb != nil {
+		entry.Remediation = rb.Build(c)
+	}
+
+	return entry
 }
 
 // gvrToAPIVersion converts a GVR to an API version string.

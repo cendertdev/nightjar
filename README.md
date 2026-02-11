@@ -137,7 +137,9 @@ See [Agent Outputs](docs/AGENT_OUTPUTS.md) for full design documentation.
 - [Notifications](docs/controller/notifications.md) — Event, report, and annotation notification system
 - [Configuration](docs/controller/configuration.md) — Controller and webhook configuration options
 - [Adapter Guide](docs/ADAPTER_GUIDE.md) — How to write a constraint adapter for a new policy engine
-- [Project Plan](docs/PROJECT_PLAN.md) — Phased delivery timeline and milestones
+- [Helm Chart](deploy/helm/README.md) — Helm chart documentation and values reference
+- [Examples](examples/) — Standalone YAML manifests for trying out Nightjar
+- [Changelog](CHANGELOG.md) — Release history
 - [Contributing](CONTRIBUTING.md) — How to contribute to the project
 
 ## License

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,12 +11,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/nightjarctl/nightjar/internal/indexer"
+	"github.com/nightjarctl/nightjar/internal/requirements"
 	"github.com/nightjarctl/nightjar/internal/types"
 )
+
+// mockEvalContext returns empty results for all queries, causing rules to detect missing resources.
+type mockEvalContext struct{}
+
+func (m *mockEvalContext) GetNamespace(_ context.Context, name string) (*unstructured.Unstructured, error) {
+	ns := &unstructured.Unstructured{}
+	ns.SetName(name)
+	return ns, nil
+}
+
+func (m *mockEvalContext) ListByGVR(_ context.Context, _ schema.GroupVersionResource, _ string) ([]*unstructured.Unstructured, error) {
+	return nil, nil
+}
+
+func (m *mockEvalContext) FindMatchingResources(_ context.Context, _ schema.GroupVersionResource, _ string, _ map[string]string) ([]*unstructured.Unstructured, error) {
+	return nil, nil
+}
 
 func setupTestServer() (*Server, *indexer.Indexer) {
 	idx := indexer.New(nil)
@@ -1284,6 +1304,104 @@ func TestServer_BroadcastEvent(t *testing.T) {
 
 	// Should not panic even with no SSE clients
 	server.BroadcastEvent("test_event", data)
+}
+
+func TestHandlers_Check_WithMissingPrerequisites(t *testing.T) {
+	idx := indexer.New(nil)
+
+	eval := requirements.NewEvaluator(idx, &mockEvalContext{}, zap.NewNop())
+	eval.SetDebounceDuration(0) // Immediate results for pre-check
+	eval.RegisterRule(requirements.NewPrometheusMonitorRule())
+
+	opts := ServerOptions{
+		Port:      8090,
+		Transport: "sse",
+		Logger:    zap.NewNop(),
+		PrivacyResolver: func(r *http.Request) types.DetailLevel {
+			return types.DetailLevelDetailed
+		},
+		Evaluator: eval,
+	}
+	server := NewServer(idx, opts)
+
+	// Deployment with a metrics port — should trigger missing ServiceMonitor
+	manifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: team-alpha
+  labels:
+    app: my-app
+spec:
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+      - name: app
+        ports:
+        - name: metrics
+          containerPort: 9090
+`
+	params := CheckParams{Manifest: manifest}
+	body, _ := json.Marshal(params)
+	req := httptest.NewRequest(http.MethodPost, "/tools/nightjar_check", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	server.handlers.HandleCheck(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var result CheckResult
+	err := json.NewDecoder(w.Body).Decode(&result)
+	require.NoError(t, err)
+
+	// Should have missing prerequisites
+	require.NotEmpty(t, result.MissingPrerequisites)
+	assert.Equal(t, "ServiceMonitor", result.MissingPrerequisites[0].ExpectedKind)
+	assert.Equal(t, "monitoring.coreos.com/v1", result.MissingPrerequisites[0].ExpectedAPIVersion)
+	assert.NotEmpty(t, result.MissingPrerequisites[0].ForWorkload)
+	assert.NotEmpty(t, result.MissingPrerequisites[0].Reason)
+	assert.Equal(t, "Warning", result.MissingPrerequisites[0].Severity)
+}
+
+func TestHandlers_Check_NilEvaluator(t *testing.T) {
+	// Server without evaluator — backward compatibility
+	idx := indexer.New(nil)
+	opts := ServerOptions{
+		Logger: zap.NewNop(),
+		PrivacyResolver: func(r *http.Request) types.DetailLevel {
+			return types.DetailLevelDetailed
+		},
+	}
+	server := NewServer(idx, opts)
+
+	manifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  namespace: default
+spec:
+  replicas: 1
+`
+	params := CheckParams{Manifest: manifest}
+	body, _ := json.Marshal(params)
+	req := httptest.NewRequest(http.MethodPost, "/tools/nightjar_check", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	server.handlers.HandleCheck(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var result CheckResult
+	err := json.NewDecoder(w.Body).Decode(&result)
+	require.NoError(t, err)
+
+	// Should have empty missing prerequisites (not nil)
+	assert.Empty(t, result.MissingPrerequisites)
 }
 
 func TestToConstraintResult_PrivacyScoping(t *testing.T) {

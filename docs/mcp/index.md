@@ -91,7 +91,7 @@ mcp:
   port: 8090
 ```
 
-Endpoint: `http://nightjar-controller.nightjar-system.svc:8090/mcp`
+Endpoint: `http://nightjar-controller.nightjar-system.svc:8090/sse`
 
 ### stdio
 

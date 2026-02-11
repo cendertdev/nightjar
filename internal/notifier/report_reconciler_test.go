@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -540,7 +541,7 @@ func TestNewReportReconciler(t *testing.T) {
 	logger := zap.NewNop()
 	opts := DefaultReportReconcilerOptions()
 
-	rr := NewReportReconciler(nil, idx, logger, opts)
+	rr := NewReportReconciler(nil, idx, logger, opts, nil, nil)
 
 	require.NotNil(t, rr)
 	assert.NotNil(t, rr.remediationBuilder)
@@ -554,7 +555,7 @@ func TestNewReportReconciler_ZeroValues(t *testing.T) {
 	logger := zap.NewNop()
 	opts := ReportReconcilerOptions{} // all zero
 
-	rr := NewReportReconciler(nil, idx, logger, opts)
+	rr := NewReportReconciler(nil, idx, logger, opts, nil, nil)
 
 	// Should apply defaults
 	assert.Equal(t, 10*time.Second, rr.opts.DebounceDuration)
@@ -643,4 +644,106 @@ func TestReportReconciler_ExtractResourceMetrics_NoResources(t *testing.T) {
 
 	metrics := rr.extractResourceMetrics(c)
 	assert.Nil(t, metrics)
+}
+
+func TestConstraintToMissingResourceEntry(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+	workload := &unstructured.Unstructured{}
+	workload.SetKind("Deployment")
+	workload.SetName("my-app")
+
+	c := types.Constraint{
+		UID:            k8stypes.UID("missing:prometheus-monitor:team-alpha/my-app"),
+		Name:           "missing-prometheus-monitor-my-app",
+		Namespace:      "team-alpha",
+		ConstraintType: types.ConstraintTypeMissing,
+		Severity:       types.SeverityWarning,
+		Details: map[string]interface{}{
+			"expectedKind":       "ServiceMonitor",
+			"expectedAPIVersion": "monitoring.coreos.com/v1",
+			"reason":             "Workload has metrics port but no monitor",
+		},
+	}
+
+	entry := constraintToMissingResourceEntry(c, workload, rb)
+
+	assert.Equal(t, "ServiceMonitor", entry.ExpectedKind)
+	assert.Equal(t, "monitoring.coreos.com/v1", entry.ExpectedAPIVersion)
+	assert.Equal(t, "Workload has metrics port but no monitor", entry.Reason)
+	assert.Equal(t, "Warning", entry.Severity)
+	assert.Equal(t, "Deployment", entry.ForWorkload.Kind)
+	assert.Equal(t, "my-app", entry.ForWorkload.Name)
+	assert.NotEmpty(t, entry.Remediation.Summary)
+}
+
+func TestConstraintToMissingResourceEntry_NilWorkload(t *testing.T) {
+	rb := NewRemediationBuilder("platform@example.com")
+
+	c := types.Constraint{
+		Severity: types.SeverityWarning,
+		Details: map[string]interface{}{
+			"expectedKind": "ServiceMonitor",
+		},
+	}
+
+	entry := constraintToMissingResourceEntry(c, nil, rb)
+
+	assert.Equal(t, "ServiceMonitor", entry.ExpectedKind)
+	assert.Empty(t, entry.ForWorkload.Kind)
+	assert.Empty(t, entry.ForWorkload.Name)
+}
+
+func TestConstraintToMissingResourceEntry_NilRemediationBuilder(t *testing.T) {
+	workload := &unstructured.Unstructured{}
+	workload.SetKind("StatefulSet")
+	workload.SetName("db")
+
+	c := types.Constraint{
+		Severity: types.SeverityWarning,
+	}
+
+	entry := constraintToMissingResourceEntry(c, workload, nil)
+
+	assert.Equal(t, "Warning", entry.Severity)
+	assert.Equal(t, "StatefulSet", entry.ForWorkload.Kind)
+}
+
+func TestEvaluateMissingResources_NilEvaluator(t *testing.T) {
+	rr := &ReportReconciler{
+		logger: zap.NewNop(),
+	}
+
+	result := rr.evaluateMissingResources("team-alpha")
+	assert.Empty(t, result)
+	assert.NotNil(t, result) // Should be empty slice, not nil
+}
+
+func TestBuildReportStatus_WithMissingResources(t *testing.T) {
+	// This test verifies that MissingResources is present in machine-readable output.
+	// With nil evaluator, it should be an empty slice.
+	rr := &ReportReconciler{
+		logger:             zap.NewNop(),
+		remediationBuilder: NewRemediationBuilder("platform@example.com"),
+		opts: ReportReconcilerOptions{
+			DefaultDetailLevel: types.DetailLevelSummary,
+			DefaultContact:     "platform@example.com",
+		},
+	}
+
+	constraints := []types.Constraint{
+		{
+			UID:            k8stypes.UID("uid-1"),
+			Name:           "test-policy",
+			Namespace:      "team-alpha",
+			ConstraintType: types.ConstraintTypeNetworkEgress,
+			Severity:       types.SeverityWarning,
+			Source:         schema.GroupVersionResource{Resource: "networkpolicies"},
+		},
+	}
+
+	status := rr.buildReportStatus(constraints, "team-alpha")
+
+	require.NotNil(t, status.MachineReadable)
+	assert.NotNil(t, status.MachineReadable.MissingResources)
+	assert.Empty(t, status.MachineReadable.MissingResources)
 }
