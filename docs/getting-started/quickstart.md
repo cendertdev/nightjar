@@ -24,6 +24,7 @@ A 5-minute hands-on introduction to Nightjar.
 - Kubernetes cluster (minikube, kind, or cloud)
 - Helm 3.10+
 - kubectl configured
+- Go 1.21+ (only if installing CLI via `go install`)
 
 ---
 
@@ -123,9 +124,19 @@ You'll see both the NetworkPolicy and ResourceQuota represented as constraints.
 ## Step 4: Install and Use the CLI
 
 ```bash
-# Install CLI
-go install github.com/nightjarctl/nightjar/cmd/nightjarctl@latest
+# Download binary (Linux amd64)
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
 
+# Or via Go (requires Go 1.21+)
+# go install github.com/nightjarctl/nightjar/cmd/nightjarctl@latest
+```
+
+{: .note }
+> See the [Installation Guide](../installation/#cli-installation) for macOS, Windows, and other platforms.
+
+```bash
 # Query constraints
 nightjar query -n quickstart-demo
 ```

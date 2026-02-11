@@ -130,10 +130,16 @@ helm install nightjar nightjar/nightjar -n nightjar-system --create-namespace
 Then install the CLI:
 
 ```bash
-go install github.com/nightjarctl/nightjar/cmd/nightjarctl@latest
+# Download binary (Linux amd64)
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
+
+# Or via Go (requires Go 1.21+)
+# go install github.com/nightjarctl/nightjar/cmd/nightjarctl@latest
 ```
 
-See the [Installation Guide](/nightjar/getting-started/installation/) for detailed instructions.
+See the [Installation Guide](/nightjar/getting-started/installation/) for macOS, Windows, and other platforms.
 
 ---
 

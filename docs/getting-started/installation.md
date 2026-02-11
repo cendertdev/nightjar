@@ -134,7 +134,53 @@ hubble:
 
 ## CLI Installation
 
+### Download Binary
+
+Pre-built binaries are available from [GitHub Releases](https://github.com/cendertdev/nightjar/releases).
+
+**Linux (amd64)**:
+```bash
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
+```
+
+**Linux (arm64)**:
+```bash
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-arm64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
+```
+
+**macOS (Apple Silicon)**:
+```bash
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-darwin-arm64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
+```
+
+**macOS (Intel)**:
+```bash
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-darwin-amd64 -o nightjar
+chmod +x nightjar
+sudo mv nightjar /usr/local/bin/
+```
+
+**Windows (amd64)**:
+```powershell
+Invoke-WebRequest -Uri https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-windows-amd64.exe -OutFile nightjar.exe
+Move-Item nightjar.exe C:\Windows\System32\
+```
+
+**Verify checksum** (optional):
+```bash
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjarctl-linux-amd64.sha256
+sha256sum nightjar
+```
+
 ### Using Go
+
+Requires Go 1.21+.
 
 ```bash
 go install github.com/nightjarctl/nightjar/cmd/nightjarctl@latest
@@ -161,8 +207,13 @@ mv bin/nightjar /usr/local/bin/
 The CLI can also be invoked as a kubectl plugin:
 
 ```bash
-# Install
-go install github.com/nightjarctl/nightjar/cmd/kubectl-sentinel@latest
+# Download binary (Linux amd64)
+curl -sL https://github.com/cendertdev/nightjar/releases/latest/download/nightjar-sentinel-linux-amd64 -o kubectl-sentinel
+chmod +x kubectl-sentinel
+sudo mv kubectl-sentinel /usr/local/bin/
+
+# Or via Go (requires Go 1.21+)
+# go install github.com/nightjarctl/nightjar/cmd/kubectl-sentinel@latest
 
 # Use
 kubectl sentinel query -n my-namespace
