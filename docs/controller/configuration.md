@@ -171,6 +171,42 @@ adapters:
 
 ---
 
+## Discovery Tuning
+
+```yaml
+discovery:
+  # Additional API groups to treat as policy sources
+  additionalPolicyGroups: []
+  # Example: ["policy.internal.company.com", "security.corp.io"]
+
+  # Additional resource name substrings for heuristic detection
+  additionalPolicyNameHints: []
+  # Example: ["restriction", "guard"]
+
+  # Check CRDs for nightjar.io/is-policy annotation during scan
+  checkCRDAnnotations: true
+```
+
+### Discovery Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `additionalPolicyGroups` | `[]` | Extra API groups treated as policy sources |
+| `additionalPolicyNameHints` | `[]` | Extra resource name substrings for heuristic detection |
+| `checkCRDAnnotations` | `true` | Check CRDs for `nightjar.io/is-policy` annotation |
+
+The discovery engine uses several heuristics to identify constraint-like resources:
+1. **Known policy groups** (e.g., `networking.k8s.io`, `cilium.io`, `kyverno.io`)
+2. **Adapter registry** — resources handled by a registered adapter
+3. **Native resources** — `resourcequotas`, `limitranges`
+4. **Name heuristics** — resource names containing `policy`, `constraint`, `rule`, etc.
+5. **ConstraintProfile** — explicitly registered resources
+6. **CRD annotations** — CRDs with `nightjar.io/is-policy: "true"`
+
+Use `additionalPolicyGroups` and `additionalPolicyNameHints` to extend the built-in heuristics without needing a ConstraintProfile for each resource.
+
+---
+
 ## Hubble Integration
 
 ```yaml
@@ -431,6 +467,11 @@ adapters:
     enabled: auto
   kyverno:
     enabled: auto
+
+discovery:
+  additionalPolicyGroups:
+    - policy.internal.company.com
+  checkCRDAnnotations: true
 
 hubble:
   enabled: true

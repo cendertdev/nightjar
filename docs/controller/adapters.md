@@ -283,6 +283,34 @@ The generic adapter extracts:
 - Labels from `metadata.labels`
 - Summary from `spec.description` (if present)
 
+### Field-Path Configuration
+
+When a CRD stores its selectors, effects, or summaries in non-standard locations, use `fieldPaths` to tell the generic adapter where to find them:
+
+```yaml
+apiVersion: nightjar.io/v1alpha1
+kind: ConstraintProfile
+metadata:
+  name: custom-deployment-restrictions
+spec:
+  gvr:
+    group: policy.company.com
+    version: v1
+    resource: deploymentrestrictions
+  adapter: generic
+  enabled: true
+  severity: Warning
+  fieldPaths:
+    selectorPath: "spec.target.workloads"
+    namespaceSelectorPath: "spec.scope.namespaces"
+    effectPath: "spec.action"
+    summaryPath: "spec.description"
+```
+
+Field paths use dot notation (e.g., `spec.target.workloads`). All field-path settings are optional — when unset, the generic adapter uses its default extraction logic.
+
+**Precedence:** Resource annotations (`nightjar.io/severity`, `nightjar.io/summary`) always take precedence over profile-configured values.
+
 ---
 
 ## Adapter Health
