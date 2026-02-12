@@ -324,3 +324,23 @@ Webhook  ──GET /api/v1/constraints?namespace=<ns>──▶  Controller
 - The internal controller query timeout is 3 seconds
 - If the controller is slow, check controller pod resources and constraint count
 - Increase `admissionWebhook.timeoutSeconds` if needed (but keep it under 10s to avoid slowing deployments)
+
+## E2E Testing
+
+The webhook is covered by E2E tests in `test/e2e/webhook_test.go`. To run them:
+
+```bash
+make e2e-setup   # Deploys controller + webhook in Kind with self-signed certs
+make e2e         # Runs all E2E tests including webhook suite
+make e2e-teardown
+```
+
+The E2E setup enables the webhook with `admissionWebhook.enabled=true`, `replicas=2`, and `certManagement=self-signed`. Tests verify:
+
+- Webhook deployment readiness and service endpoints
+- Health probe liveness (via pod Ready condition)
+- Admission warnings with `[WARNING]`/`[CRITICAL]` prefixes for matching constraints
+- Never-reject guarantee (workloads always admitted)
+- Fail-open behavior when the webhook is unavailable
+- Self-signed TLS certificate injection (Secret + VWC caBundle)
+- PodDisruptionBudget enforcement (minAvailable when replicas > 1)

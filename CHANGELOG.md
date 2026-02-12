@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- E2E tests for admission webhook warnings — deployment readiness, constraint warning capture, fail-open behavior, self-signed TLS certificate injection, PDB enforcement
+- Wire controller constraint query API (`GET /api/v1/constraints`) for webhook integration
 - E2E tests for correlation engine and Event notifications — event creation with structured annotations, deduplication, privacy scoping, workload annotation patching, rate limiting
 - Wire EventBuilder into Dispatcher for structured annotations on all emitted Events
 - E2E tests for core discovery engine and native K8s adapters (NetworkPolicy, ResourceQuota, LimitRange, WebhookConfiguration, generic CRD, periodic rescan)
