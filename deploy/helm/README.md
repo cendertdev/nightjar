@@ -131,6 +131,7 @@ The table below lists the most commonly configured parameters. See the [full con
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `rbac.create` | `true` | Create ClusterRole and ClusterRoleBinding |
+| `rbac.workloadPatch` | `true` | Grant `patch` on Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs, CronJobs, and Pods for workload annotation |
 | `serviceAccount.create` | `true` | Create ServiceAccount |
 | `serviceAccount.name` | `""` | ServiceAccount name (auto-generated if empty) |
 | `workloadAnnotations.enabled` | `true` | Annotate workloads with constraint summaries |
