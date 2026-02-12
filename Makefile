@@ -54,7 +54,11 @@ e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controll
 		--set controller.image.tag=dev \
 		--set controller.image.pullPolicy=IfNotPresent \
 		--set controller.rescanInterval=30s \
-		--set admissionWebhook.enabled=false \
+		--set admissionWebhook.enabled=true \
+		--set admissionWebhook.replicas=2 \
+		--set admissionWebhook.certManagement=self-signed \
+		--set admissionWebhook.image.tag=dev \
+		--set admissionWebhook.image.pullPolicy=IfNotPresent \
 		--wait --timeout 120s
 
 .PHONY: e2e
@@ -78,7 +82,11 @@ e2e-setup-dd: docker-build-all ## Deploy controller for E2E on Docker Desktop Ku
 		--set controller.image.tag=dev \
 		--set controller.image.pullPolicy=Never \
 		--set controller.rescanInterval=30s \
-		--set admissionWebhook.enabled=false \
+		--set admissionWebhook.enabled=true \
+		--set admissionWebhook.replicas=2 \
+		--set admissionWebhook.certManagement=self-signed \
+		--set admissionWebhook.image.tag=dev \
+		--set admissionWebhook.image.pullPolicy=Never \
 		--wait --timeout 120s
 
 .PHONY: e2e-teardown-dd
