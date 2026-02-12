@@ -53,6 +53,7 @@ e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controll
 		--set controller.leaderElect=false \
 		--set controller.image.tag=dev \
 		--set controller.image.pullPolicy=IfNotPresent \
+		--set controller.rescanInterval=30s \
 		--set admissionWebhook.enabled=false \
 		--wait --timeout 120s
 
@@ -76,6 +77,7 @@ e2e-setup-dd: docker-build-all ## Deploy controller for E2E on Docker Desktop Ku
 		--set controller.leaderElect=false \
 		--set controller.image.tag=dev \
 		--set controller.image.pullPolicy=Never \
+		--set controller.rescanInterval=30s \
 		--set admissionWebhook.enabled=false \
 		--wait --timeout 120s
 
