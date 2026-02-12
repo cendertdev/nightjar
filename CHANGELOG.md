@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- E2E tests for correlation engine and Event notifications — event creation with structured annotations, deduplication, privacy scoping, workload annotation patching, rate limiting
+- Wire EventBuilder into Dispatcher for structured annotations on all emitted Events
 - E2E tests for constraint indexer and ConstraintReport reconciliation — CRUD lifecycle, severity counting, machine-readable validation, cluster-scoped constraint propagation
 - E2E test infrastructure and harness for Kind cluster testing — shared helpers, testify suite, Makefile targets (`e2e-setup`, `e2e`, `e2e-teardown`)
 - Hubble flow drop streaming — connects to Hubble Relay and streams `verdict=DROPPED` flows for real-time network policy correlation

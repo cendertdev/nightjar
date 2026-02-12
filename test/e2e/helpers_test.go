@@ -300,6 +300,261 @@ func getControllerLogs(t *testing.T, clientset kubernetes.Interface, tailLines i
 	return buf.String()
 }
 
+// --- Correlation test helpers ---
+
+// correlationEventTimeout is the time to wait for a Nightjar ConstraintNotification event.
+// Accounts for: informer sync + adapter parse + indexer upsert + event watch + correlation + dispatch.
+const correlationEventTimeout = 60 * time.Second
+
+// workloadAnnotationTimeout is the time to wait for workload annotations to appear.
+// Accounts for: indexer upsert + onChange callback + debounce (30s) + patch.
+const workloadAnnotationTimeout = 90 * time.Second
+
+// createTestDeployment creates a minimal Deployment using pause:3.9 in the given namespace.
+// Returns a cleanup function that deletes the deployment.
+func createTestDeployment(t *testing.T, dynamicClient dynamic.Interface, namespace, name string) func() {
+	t.Helper()
+	depGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	dep := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+				"labels": map[string]interface{}{
+					e2eLabel: "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(1),
+				"selector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{
+						"app": name,
+					},
+				},
+				"template": map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"labels": map[string]interface{}{
+							"app": name,
+						},
+					},
+					"spec": map[string]interface{}{
+						"containers": []interface{}{
+							map[string]interface{}{
+								"name":  "pause",
+								"image": "registry.k8s.io/pause:3.9",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := dynamicClient.Resource(depGVR).Namespace(namespace).Create(
+		context.Background(), dep, metav1.CreateOptions{},
+	)
+	require.NoError(t, err, "failed to create test deployment %s/%s", namespace, name)
+	t.Logf("Created test deployment: %s/%s", namespace, name)
+
+	return func() {
+		_ = dynamicClient.Resource(depGVR).Namespace(namespace).Delete(
+			context.Background(), name, metav1.DeleteOptions{},
+		)
+	}
+}
+
+// waitForNightjarEvent polls for Kubernetes Events created by Nightjar (Reason=ConstraintNotification,
+// Source.Component=nightjar-controller) that reference the given workload name.
+func waitForNightjarEvent(t *testing.T, clientset kubernetes.Interface, namespace, workloadName string, timeout time.Duration) []corev1.Event {
+	t.Helper()
+	var matched []corev1.Event
+
+	waitForCondition(t, timeout, defaultPollInterval, func() (bool, error) {
+		events, err := clientset.CoreV1().Events(namespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			return false, fmt.Errorf("list events: %w", err)
+		}
+		matched = nil
+		for _, ev := range events.Items {
+			if ev.InvolvedObject.Name == workloadName &&
+				ev.Reason == "ConstraintNotification" &&
+				ev.Source.Component == "nightjar-controller" {
+				matched = append(matched, ev)
+			}
+		}
+		return len(matched) > 0, nil
+	})
+	return matched
+}
+
+// getNightjarEvents returns Nightjar ConstraintNotification events for a workload
+// without waiting. Use this for counting events after a known wait period.
+func getNightjarEvents(t *testing.T, clientset kubernetes.Interface, namespace, workloadName string) []corev1.Event {
+	t.Helper()
+	events, err := clientset.CoreV1().Events(namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err, "failed to list events in %s", namespace)
+
+	var matched []corev1.Event
+	for _, ev := range events.Items {
+		if ev.InvolvedObject.Name == workloadName &&
+			ev.Reason == "ConstraintNotification" &&
+			ev.Source.Component == "nightjar-controller" {
+			matched = append(matched, ev)
+		}
+	}
+	return matched
+}
+
+// waitForNightjarEventByAnnotation polls for Nightjar events that match a specific
+// annotation key-value pair. Because the dispatcher rate-limits per namespace and
+// drops excess notifications (non-blocking Allow()), a single warning event may not
+// produce an event for every constraint. This function periodically re-sends warning
+// events to give the rate limiter time to recover and process additional constraints.
+func waitForNightjarEventByAnnotation(t *testing.T, clientset kubernetes.Interface, namespace, workloadName, annotKey, annotValue string, timeout time.Duration) []corev1.Event {
+	t.Helper()
+	var matched []corev1.Event
+	deadline := time.Now().Add(timeout)
+	retryInterval := 3 * time.Second
+	lastWarning := time.Time{}
+
+	for time.Now().Before(deadline) {
+		events, err := clientset.CoreV1().Events(namespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			t.Logf("waitForNightjarEventByAnnotation: list events: %v", err)
+			time.Sleep(defaultPollInterval)
+			continue
+		}
+		matched = nil
+		for _, ev := range events.Items {
+			if ev.InvolvedObject.Name == workloadName &&
+				ev.Reason == "ConstraintNotification" &&
+				ev.Source.Component == "nightjar-controller" &&
+				ev.Annotations != nil &&
+				ev.Annotations[annotKey] == annotValue {
+				matched = append(matched, ev)
+			}
+		}
+		if len(matched) > 0 {
+			return matched
+		}
+
+		// Re-send a warning event to trigger another round of correlation.
+		// Each new warning has a unique UID, so the correlator re-emits all
+		// constraints, giving the rate limiter another chance to process the one we want.
+		if time.Since(lastWarning) >= retryInterval {
+			createWarningEvent(t, clientset, namespace, workloadName, "Deployment")
+			lastWarning = time.Now()
+		}
+
+		time.Sleep(defaultPollInterval)
+	}
+
+	t.Fatalf("waitForNightjarEventByAnnotation: timed out after %v waiting for %s=%s on workload %s", timeout, annotKey, annotValue, workloadName)
+	return nil
+}
+
+// createWarningEvent creates a synthetic Warning event referencing the given involved object.
+// This triggers the Correlator's event watch (FieldSelector: type=Warning).
+func createWarningEvent(t *testing.T, clientset kubernetes.Interface, namespace, involvedName, involvedKind string) *corev1.Event {
+	t.Helper()
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "e2e-warning-",
+			Namespace:    namespace,
+			Labels: map[string]string{
+				e2eLabel: "true",
+			},
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      involvedKind,
+			Namespace: namespace,
+			Name:      involvedName,
+		},
+		Reason:         "E2ETestWarning",
+		Message:        "Synthetic warning event for E2E correlation testing",
+		Type:           corev1.EventTypeWarning,
+		Source:         corev1.EventSource{Component: "e2e-test"},
+		FirstTimestamp: metav1.Now(),
+		LastTimestamp:  metav1.Now(),
+		Count:          1,
+	}
+	created, err := clientset.CoreV1().Events(namespace).Create(context.Background(), event, metav1.CreateOptions{})
+	require.NoError(t, err, "failed to create warning event for %s/%s", namespace, involvedName)
+	t.Logf("Created warning event: %s", created.Name)
+	return created
+}
+
+// waitForWorkloadAnnotation polls a deployment until the specified annotation key
+// is present, then returns its value.
+func waitForWorkloadAnnotation(t *testing.T, dynamicClient dynamic.Interface, namespace, deploymentName, annotationKey string, timeout time.Duration) string {
+	t.Helper()
+	depGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	var value string
+
+	waitForCondition(t, timeout, defaultPollInterval, func() (bool, error) {
+		dep, err := dynamicClient.Resource(depGVR).Namespace(namespace).Get(
+			context.Background(), deploymentName, metav1.GetOptions{},
+		)
+		if err != nil {
+			return false, fmt.Errorf("get deployment: %w", err)
+		}
+		annots := dep.GetAnnotations()
+		if annots == nil {
+			return false, nil
+		}
+		v, ok := annots[annotationKey]
+		if !ok {
+			return false, nil
+		}
+		value = v
+		return true, nil
+	})
+	return value
+}
+
+// waitForStableNightjarEventCount continuously sends warning events at 1s intervals
+// to saturate the dispatcher dedup cache across all constraints. The dispatcher
+// rate limiter (100/min, burst=10) allows ~1-2 events per warning after the initial
+// burst. When all constraints are dedup'd, new warnings produce 0 new events.
+//
+// Returns the stable count when 15 consecutive seconds of warnings produce no growth.
+func waitForStableNightjarEventCount(t *testing.T, clientset kubernetes.Interface, namespace, workloadName string, timeout time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	t.Log("Sending warnings to saturate dedup cache across all constraints")
+
+	lastCount := 0
+	lastGrowth := time.Now()
+
+	for time.Now().Before(deadline) {
+		// Send a warning — this triggers the correlator to emit notifications for
+		// all constraints. The rate limiter allows ~1.67/sec through. If the
+		// constraint is already dedup'd, no event is created.
+		createWarningEvent(t, clientset, namespace, workloadName, "Deployment")
+		time.Sleep(1 * time.Second)
+
+		events := getNightjarEvents(t, clientset, namespace, workloadName)
+		currentCount := len(events)
+
+		if currentCount > lastCount {
+			t.Logf("Event count: %d (+%d)", currentCount, currentCount-lastCount)
+			lastCount = currentCount
+			lastGrowth = time.Now()
+		}
+
+		// If 15 seconds of continuous warnings produced no growth,
+		// all constraints are in the dedup cache.
+		if time.Since(lastGrowth) >= 15*time.Second && lastCount > 0 {
+			t.Logf("Event count stable at %d for 15s of continuous warnings", lastCount)
+			return lastCount
+		}
+	}
+
+	t.Fatalf("waitForStableNightjarEventCount: timed out after %v; last count=%d", timeout, lastCount)
+	return 0
+}
+
 // guessResource converts a Kind name to a plural resource name.
 // Handles common Kubernetes kinds; extend as needed.
 func guessResource(kind string) string {
