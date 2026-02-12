@@ -78,7 +78,7 @@ type Correlator struct {
 	flowDrops     chan FlowDropNotification
 	limiter       *rate.Limiter
 
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	seenPairs map[dedupeKey]time.Time
 }
 
@@ -191,12 +191,12 @@ func (c *Correlator) handleEvent(ctx context.Context, event *corev1.Event) {
 
 	// Try to match each constraint
 	for _, constraint := range constraints {
-		// Dedupe check
+		// Atomic dedupe check-and-mark (avoids TOCTOU race between isDuplicate and markSeen)
 		key := dedupeKey{
 			eventUID:      string(event.UID),
 			constraintUID: string(constraint.UID),
 		}
-		if c.isDuplicate(key) {
+		if !c.tryMarkSeen(key) {
 			continue
 		}
 
@@ -212,30 +212,30 @@ func (c *Correlator) handleEvent(ctx context.Context, event *corev1.Event) {
 
 		select {
 		case c.notifications <- notification:
-			c.markSeen(key)
+			// Already marked seen by tryMarkSeen above.
 		case <-ctx.Done():
 			return
 		default:
+			// Key is already marked seen — notification is intentionally dropped.
+			// This is preferable to a TOCTOU race that could send duplicates.
 			c.logger.Warn("Notification channel full, dropping event")
 		}
 	}
 }
 
-// isDuplicate checks if this event-constraint pair was recently processed.
-func (c *Correlator) isDuplicate(key dedupeKey) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if seenAt, exists := c.seenPairs[key]; exists {
-		return time.Since(seenAt) < dedupeWindow
-	}
-	return false
-}
-
-// markSeen records that an event-constraint pair was processed.
-func (c *Correlator) markSeen(key dedupeKey) {
+// tryMarkSeen atomically checks if this event-constraint pair was recently
+// processed and, if not, marks it as seen. Returns true if this is a new
+// (non-duplicate) pair that should be dispatched.
+func (c *Correlator) tryMarkSeen(key dedupeKey) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if seenAt, exists := c.seenPairs[key]; exists {
+		if time.Since(seenAt) < dedupeWindow {
+			return false
+		}
+	}
 	c.seenPairs[key] = time.Now()
+	return true
 }
 
 // cleanupDedupeCache periodically removes old entries from the dedupe cache.
@@ -343,7 +343,7 @@ func (c *Correlator) correlateFlowDropInNamespace(ctx context.Context, drop hubb
 			continue
 		}
 
-		// Dedupe check using flow details as the key
+		// Atomic dedupe check-and-mark using flow details as the key
 		flowKey := fmt.Sprintf("flow:%s:%s:%s:%d",
 			drop.Source.PodName, drop.Destination.PodName,
 			drop.L4.Protocol, drop.L4.DestinationPort)
@@ -351,7 +351,7 @@ func (c *Correlator) correlateFlowDropInNamespace(ctx context.Context, drop hubb
 			eventUID:      flowKey,
 			constraintUID: string(constraint.UID),
 		}
-		if c.isDuplicate(key) {
+		if !c.tryMarkSeen(key) {
 			continue
 		}
 
@@ -379,10 +379,12 @@ func (c *Correlator) correlateFlowDropInNamespace(ctx context.Context, drop hubb
 
 		select {
 		case c.flowDrops <- notification:
-			c.markSeen(key)
+			// Already marked seen by tryMarkSeen above.
 		case <-ctx.Done():
 			return
 		default:
+			// Key is already marked seen — notification is intentionally dropped.
+			// This is preferable to a TOCTOU race that could send duplicates.
 			c.logger.Warn("Flow drop notification channel full")
 		}
 	}

@@ -630,34 +630,6 @@ func createSentinelDeployment(t *testing.T, clientset kubernetes.Interface, name
 	}
 }
 
-// waitForWorkloadAnnotation polls until the given annotation key appears on a
-// Deployment. Returns the annotation value.
-func waitForWorkloadAnnotation(t *testing.T, dynamicClient dynamic.Interface, namespace, deploymentName, annotationKey string, timeout time.Duration) string {
-	t.Helper()
-	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	var value string
-
-	waitForCondition(t, timeout, defaultPollInterval, func() (bool, error) {
-		obj, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(
-			context.Background(), deploymentName, metav1.GetOptions{},
-		)
-		if err != nil {
-			return false, fmt.Errorf("get deployment: %w", err)
-		}
-		annots := obj.GetAnnotations()
-		if annots == nil {
-			return false, nil
-		}
-		v, ok := annots[annotationKey]
-		if !ok {
-			return false, nil
-		}
-		value = v
-		return true, nil
-	})
-	return value
-}
-
 // getWorkloadConstraints parses the nightjar.io/constraints JSON annotation
 // from a Deployment and returns the decoded constraint summaries.
 func getWorkloadConstraints(t *testing.T, dynamicClient dynamic.Interface, namespace, deploymentName string, timeout time.Duration) []constraintSummary {

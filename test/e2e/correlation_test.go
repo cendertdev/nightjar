@@ -249,6 +249,7 @@ func (s *E2ESuite) TestCorrelationPrivacyScoping() {
 
 	// 5. Verify privacy scoping on the Admission event's annotations.
 	webhookEvent := &events[0]
+	require.NotNil(t, webhookEvent.Annotations, "event should have annotations")
 
 	// At summary level for cross-namespace constraint:
 	// - constraint-name should be "redacted"

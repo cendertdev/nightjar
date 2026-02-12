@@ -39,17 +39,19 @@ type dedupeKey struct {
 
 // nsRateLimiter tracks rate limits per namespace.
 type nsRateLimiter struct {
-	mu       sync.RWMutex
-	limiters map[string]*rate.Limiter
-	rate     rate.Limit
-	burst    int
+	mu         sync.Mutex
+	limiters   map[string]*rate.Limiter
+	lastAccess map[string]time.Time
+	rate       rate.Limit
+	burst      int
 }
 
 func newNsRateLimiter(perMinute int) *nsRateLimiter {
 	return &nsRateLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		rate:     rate.Limit(float64(perMinute) / 60.0),
-		burst:    perMinute / 10, // 10% burst
+		limiters:   make(map[string]*rate.Limiter),
+		lastAccess: make(map[string]time.Time),
+		rate:       rate.Limit(float64(perMinute) / 60.0),
+		burst:      max(1, perMinute/10), // 10% burst, minimum 1
 	}
 }
 
@@ -61,7 +63,21 @@ func (n *nsRateLimiter) Allow(ns string) bool {
 		limiter = rate.NewLimiter(n.rate, n.burst)
 		n.limiters[ns] = limiter
 	}
+	n.lastAccess[ns] = time.Now()
 	return limiter.Allow()
+}
+
+// Evict removes namespace rate limiters that haven't been accessed within maxAge.
+func (n *nsRateLimiter) Evict(maxAge time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for ns, last := range n.lastAccess {
+		if last.Before(cutoff) {
+			delete(n.limiters, ns)
+			delete(n.lastAccess, ns)
+		}
+	}
 }
 
 // Dispatcher renders and dispatches constraint notifications.
@@ -282,6 +298,9 @@ func (d *Dispatcher) cleanupDedupeCache(ctx context.Context) {
 				}
 			}
 			d.mu.Unlock()
+
+			// Evict stale namespace rate limiters (namespaces not seen in 1 hour).
+			d.nsLimiter.Evict(time.Hour)
 		}
 	}
 }
