@@ -28,6 +28,7 @@ import (
 	"github.com/nightjarctl/nightjar/internal/adapters/networkpolicy"
 	"github.com/nightjarctl/nightjar/internal/adapters/resourcequota"
 	"github.com/nightjarctl/nightjar/internal/adapters/webhookconfig"
+	internalapi "github.com/nightjarctl/nightjar/internal/api"
 	internalcontroller "github.com/nightjarctl/nightjar/internal/controller"
 	"github.com/nightjarctl/nightjar/internal/correlator"
 	discoveryengine "github.com/nightjarctl/nightjar/internal/discovery"
@@ -86,28 +87,23 @@ func main() {
 		zap.Bool("hubble_enabled", hubbleEnabled),
 	)
 
-	// Setup controller-runtime manager
-	cfg := ctrl.GetConfigOrDie()
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		LeaderElection:         leaderElect,
-		LeaderElectionID:       "nightjar-leader",
-		HealthProbeBindAddress: healthAddr,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsAddr,
-		},
+	// Build constraint indexer with annotator + report reconciler callbacks.
+	// Created before the manager so its API handlers can be registered on the
+	// metrics server via ExtraHandlers.
+	var annotatorRef atomic.Pointer[notifier.WorkloadAnnotator]
+	var reportReconcilerRef atomic.Pointer[notifier.ReportReconciler]
+	idx := indexer.New(func(event indexer.IndexEvent) {
+		logger.Debug("Index event",
+			zap.String("type", event.Type),
+			zap.String("constraint", event.Constraint.Name),
+		)
+		if a := annotatorRef.Load(); a != nil {
+			a.OnIndexChange(event)
+		}
+		if rr := reportReconcilerRef.Load(); rr != nil {
+			rr.OnIndexChange(event)
+		}
 	})
-	if err != nil {
-		logger.Fatal("Unable to create manager", zap.Error(err))
-	}
-
-	// Register health checks
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		logger.Fatal("Unable to set up health check", zap.Error(err))
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		logger.Fatal("Unable to set up readiness check", zap.Error(err))
-	}
 
 	// Build adapter registry
 	registry := adapters.NewRegistry()
@@ -122,6 +118,31 @@ func main() {
 		zap.Int("adapter_count", len(registry.All())),
 		zap.Int("handled_gvrs", len(registry.HandledGVRs())),
 	)
+
+	// Setup controller-runtime manager with API handlers on the metrics server.
+	// The webhook queries the controller at this address for constraint data.
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 scheme,
+		LeaderElection:         leaderElect,
+		LeaderElectionID:       "nightjar-leader",
+		HealthProbeBindAddress: healthAddr,
+		Metrics: metricsserver.Options{
+			BindAddress:   metricsAddr,
+			ExtraHandlers: internalapi.ExtraHandlers(idx, logger, internalapi.CapabilitiesHandlerOptions{Adapters: internalapi.DefaultAdapters()}),
+		},
+	})
+	if err != nil {
+		logger.Fatal("Unable to create manager", zap.Error(err))
+	}
+
+	// Register health checks
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		logger.Fatal("Unable to set up health check", zap.Error(err))
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		logger.Fatal("Unable to set up readiness check", zap.Error(err))
+	}
 
 	// Build clients
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
@@ -138,22 +159,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create clientset", zap.Error(err))
 	}
-
-	// Build constraint indexer with annotator + report reconciler callbacks
-	var annotatorRef atomic.Pointer[notifier.WorkloadAnnotator]
-	var reportReconcilerRef atomic.Pointer[notifier.ReportReconciler]
-	idx := indexer.New(func(event indexer.IndexEvent) {
-		logger.Debug("Index event",
-			zap.String("type", event.Type),
-			zap.String("constraint", event.Constraint.Name),
-		)
-		if a := annotatorRef.Load(); a != nil {
-			a.OnIndexChange(event)
-		}
-		if rr := reportReconcilerRef.Load(); rr != nil {
-			rr.OnIndexChange(event)
-		}
-	})
 
 	// Build discovery engine
 	engine := discoveryengine.NewEngine(

@@ -15,8 +15,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -628,6 +630,132 @@ func createSentinelDeployment(t *testing.T, clientset kubernetes.Interface, name
 			t.Logf("Warning: failed to delete sentinel deployment %s/%s: %v", namespace, name, err)
 		}
 	}
+}
+
+// --- Webhook test helpers ---
+
+const (
+	// webhookDeploymentName is the name of the webhook Deployment in the E2E cluster.
+	webhookDeploymentName = "nightjar-webhook"
+
+	// webhookServiceName is the name of the webhook Service.
+	webhookServiceName = "nightjar-webhook"
+
+	// webhookConfigName is the name of the ValidatingWebhookConfiguration.
+	webhookConfigName = "nightjar-webhook"
+
+	// webhookSecretName is the name of the TLS Secret for self-signed certs.
+	webhookSecretName = "nightjar-webhook-tls"
+
+	// webhookReadyTimeout is time to wait for the webhook to become fully ready
+	// (deployment + VWC caBundle injected).
+	webhookReadyTimeout = 120 * time.Second
+)
+
+// waitForWebhookReady waits for the webhook Deployment to have ready replicas
+// AND the ValidatingWebhookConfiguration to have a non-empty caBundle.
+func waitForWebhookReady(t *testing.T, clientset kubernetes.Interface, timeout time.Duration) {
+	t.Helper()
+	t.Logf("Waiting for webhook deployment %s/%s to become ready...", controllerNamespace, webhookDeploymentName)
+
+	// First wait for Deployment readiness.
+	waitForDeploymentReady(t, clientset, controllerNamespace, webhookDeploymentName, timeout)
+
+	// Then wait for VWC caBundle to be populated (self-signed cert injection).
+	t.Log("Waiting for ValidatingWebhookConfiguration caBundle to be populated...")
+	waitForCondition(t, timeout, defaultPollInterval, func() (bool, error) {
+		vwc, err := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(
+			context.Background(), webhookConfigName, metav1.GetOptions{},
+		)
+		if err != nil {
+			return false, fmt.Errorf("get VWC: %w", err)
+		}
+		if len(vwc.Webhooks) == 0 {
+			return false, nil
+		}
+		caBundle := vwc.Webhooks[0].ClientConfig.CABundle
+		if len(caBundle) == 0 {
+			return false, nil
+		}
+		t.Logf("VWC caBundle populated (%d bytes)", len(caBundle))
+		return true, nil
+	})
+}
+
+// getValidatingWebhookConfig returns the ValidatingWebhookConfiguration for
+// the nightjar webhook.
+func getValidatingWebhookConfig(t *testing.T, clientset kubernetes.Interface) *admissionregistrationv1.ValidatingWebhookConfiguration {
+	t.Helper()
+	vwc, err := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(
+		context.Background(), webhookConfigName, metav1.GetOptions{},
+	)
+	require.NoError(t, err, "failed to get ValidatingWebhookConfiguration %s", webhookConfigName)
+	return vwc
+}
+
+// getTLSSecret returns the webhook TLS Secret.
+func getTLSSecret(t *testing.T, clientset kubernetes.Interface) *corev1.Secret {
+	t.Helper()
+	secret, err := clientset.CoreV1().Secrets(controllerNamespace).Get(
+		context.Background(), webhookSecretName, metav1.GetOptions{},
+	)
+	require.NoError(t, err, "failed to get TLS secret %s/%s", controllerNamespace, webhookSecretName)
+	return secret
+}
+
+// getWebhookLogs retrieves logs from the webhook pods for debugging.
+func getWebhookLogs(t *testing.T, clientset kubernetes.Interface, tailLines int64) string {
+	t.Helper()
+	pods, err := clientset.CoreV1().Pods(controllerNamespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/component=webhook",
+	})
+	if err != nil {
+		t.Logf("Warning: failed to list webhook pods: %v", err)
+		return ""
+	}
+	if len(pods.Items) == 0 {
+		t.Log("Warning: no webhook pods found")
+		return ""
+	}
+
+	var allLogs strings.Builder
+	for _, pod := range pods.Items {
+		opts := &corev1.PodLogOptions{TailLines: &tailLines}
+		stream, err := clientset.CoreV1().Pods(controllerNamespace).GetLogs(pod.Name, opts).Stream(context.Background())
+		if err != nil {
+			t.Logf("Warning: failed to get logs for webhook pod %s: %v", pod.Name, err)
+			continue
+		}
+		var buf bytes.Buffer
+		io.Copy(&buf, stream)
+		stream.Close()
+		allLogs.WriteString(fmt.Sprintf("=== %s ===\n%s\n", pod.Name, buf.String()))
+	}
+	return allLogs.String()
+}
+
+// getWebhookPDB returns the PodDisruptionBudget for the webhook, or nil if not found.
+func getWebhookPDB(t *testing.T, clientset kubernetes.Interface) *policyv1.PodDisruptionBudget {
+	t.Helper()
+	pdb, err := clientset.PolicyV1().PodDisruptionBudgets(controllerNamespace).Get(
+		context.Background(), webhookDeploymentName, metav1.GetOptions{},
+	)
+	if err != nil {
+		return nil
+	}
+	return pdb
+}
+
+// scaleDeployment scales a deployment to the given replicas and waits for it to settle.
+func scaleDeployment(t *testing.T, clientset kubernetes.Interface, namespace, name string, replicas int32) {
+	t.Helper()
+	deploy, err := clientset.AppsV1().Deployments(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err, "get deployment %s/%s", namespace, name)
+
+	deploy.Spec.Replicas = &replicas
+	_, err = clientset.AppsV1().Deployments(namespace).Update(context.Background(), deploy, metav1.UpdateOptions{})
+	require.NoError(t, err, "scale deployment %s/%s to %d", namespace, name, replicas)
+	t.Logf("Scaled %s/%s to %d replicas", namespace, name, replicas)
 }
 
 // getWorkloadConstraints parses the nightjar.io/constraints JSON annotation
