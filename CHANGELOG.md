@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dispatcher: fix burst=0 rate limiter floor when RateLimitPerMinute < 10 (allows at least 1 burst event)
+- Correlator: fix TOCTOU race in deduplication by replacing isDuplicate+markSeen with atomic tryMarkSeen
+- Dispatcher: add periodic eviction of stale namespace rate limiters to prevent unbounded map growth
 - Hubble client: fix data race on connection field during shutdown
 - Hubble client: use signal-handler context instead of background context for lifecycle management
 - Hubble client: fix incorrect drop reason mappings and replace magic integers with proto enum constants

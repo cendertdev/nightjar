@@ -2,6 +2,7 @@ package correlator
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ func TestFlowDropNotifications(t *testing.T) {
 	require.NotNil(t, ch)
 }
 
-func TestIsDuplicate(t *testing.T) {
+func TestTryMarkSeen(t *testing.T) {
 	idx := indexer.New(nil)
 	c := New(idx, nil, zap.NewNop())
 
@@ -65,14 +66,11 @@ func TestIsDuplicate(t *testing.T) {
 		constraintUID: "constraint-1",
 	}
 
-	// Not seen yet
-	assert.False(t, c.isDuplicate(key))
+	// First call: not seen yet, should succeed and mark
+	assert.True(t, c.tryMarkSeen(key), "first call should succeed")
 
-	// Mark as seen
-	c.markSeen(key)
-
-	// Now it's a duplicate
-	assert.True(t, c.isDuplicate(key))
+	// Second call: already seen, should be rejected
+	assert.False(t, c.tryMarkSeen(key), "duplicate should be rejected")
 }
 
 func TestMatchesSelector(t *testing.T) {
@@ -299,10 +297,10 @@ func TestCleanupDedupeCache(t *testing.T) {
 	c.mu.Unlock()
 
 	// Old entry should be removed, new one should remain
-	c.mu.RLock()
+	c.mu.Lock()
 	_, oldExists := c.seenPairs[oldKey]
 	_, newExists := c.seenPairs[newKey]
-	c.mu.RUnlock()
+	c.mu.Unlock()
 
 	assert.False(t, oldExists, "old entry should be cleaned up")
 	assert.True(t, newExists, "new entry should remain")
@@ -1742,10 +1740,42 @@ func TestCleanupDedupeCache_TickerRemovesOldEntries(t *testing.T) {
 
 	// Verify entries are still present (cleanup didn't trigger because we
 	// cancelled before the 1-minute ticker fired).
-	c.mu.RLock()
+	c.mu.Lock()
 	_, oldExists := c.seenPairs[oldKey]
 	_, newExists := c.seenPairs[newKey]
-	c.mu.RUnlock()
+	c.mu.Unlock()
 	assert.True(t, oldExists, "old entry should still exist (ticker didn't fire)")
 	assert.True(t, newExists, "new entry should still exist")
+}
+
+func TestCorrelator_TryMarkSeen_Concurrent(t *testing.T) {
+	idx := indexer.New(nil)
+	c := New(idx, nil, zap.NewNop())
+
+	key := dedupeKey{eventUID: "conc-evt", constraintUID: "conc-c"}
+
+	const goroutines = 100
+	results := make(chan bool, goroutines)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- c.tryMarkSeen(key)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	trueCount := 0
+	for r := range results {
+		if r {
+			trueCount++
+		}
+	}
+	assert.Equal(t, 1, trueCount, "exactly one goroutine should succeed for the same key")
 }

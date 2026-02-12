@@ -2,6 +2,8 @@ package notifier
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,6 +308,14 @@ func TestNsRateLimiter(t *testing.T) {
 	assert.True(t, limiter.Allow("other-ns"))
 }
 
+func TestNewNsRateLimiter_MinBurst(t *testing.T) {
+	// When perMinute < 10, burst must still be at least 1 (not 0).
+	limiter := newNsRateLimiter(1)
+	assert.GreaterOrEqual(t, limiter.burst, 1, "burst should be at least 1 even with perMinute=1")
+	// With burst=1, first Allow() should succeed
+	assert.True(t, limiter.Allow("test-ns"), "first call should pass with burst=1")
+}
+
 func TestGenericEffect(t *testing.T) {
 	tests := []struct {
 		ct   types.ConstraintType
@@ -341,12 +351,12 @@ func TestDispatch_RateLimited(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		n := correlator.CorrelatedNotification{
 			Constraint: types.Constraint{
-				UID:            k8stypes.UID("uid-rl-" + string(rune('0'+i))),
+				UID:            k8stypes.UID(fmt.Sprintf("uid-rl-%d", i)),
 				Name:           "test-constraint",
 				ConstraintType: types.ConstraintTypeNetworkEgress,
 			},
 			Namespace:    "rate-limited-ns",
-			WorkloadName: "workload-" + string(rune('0'+i)),
+			WorkloadName: fmt.Sprintf("workload-%d", i),
 			WorkloadKind: "Deployment",
 		}
 		_ = d.Dispatch(ctx, n)
@@ -355,7 +365,7 @@ func TestDispatch_RateLimited(t *testing.T) {
 	// At most a few events should have been created because of rate limiting
 	events, err := client.CoreV1().Events("rate-limited-ns").List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	// With burst = 0 (1/10), the initial token allows at most 1
+	// With burst = 1 (max(1, 1/10)), exactly one initial event is allowed
 	assert.LessOrEqual(t, len(events.Items), 5, "Rate limiter should limit events created")
 }
 
@@ -370,11 +380,11 @@ func TestDispatchDirect_RateLimited(t *testing.T) {
 	// Send multiple direct dispatches
 	for i := 0; i < 20; i++ {
 		c := types.Constraint{
-			UID:            k8stypes.UID("uid-drl-" + string(rune('0'+i))),
+			UID:            k8stypes.UID(fmt.Sprintf("uid-drl-%d", i)),
 			Name:           "test",
 			ConstraintType: types.ConstraintTypeAdmission,
 		}
-		_ = d.DispatchDirect(ctx, c, "rl-ns", "workload-"+string(rune('0'+i)), "Pod", types.DetailLevelSummary)
+		_ = d.DispatchDirect(ctx, c, "rl-ns", fmt.Sprintf("workload-%d", i), "Pod", types.DetailLevelSummary)
 	}
 
 	events, err := client.CoreV1().Events("rl-ns").List(ctx, metav1.ListOptions{})
@@ -470,6 +480,38 @@ func TestDispatcher_TryMarkSeen_Records(t *testing.T) {
 	assert.True(t, exists, "tryMarkSeen should add key to dedupe cache")
 }
 
+func TestDispatcher_TryMarkSeen_Concurrent(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	d := NewDispatcher(client, zap.NewNop(), DefaultDispatcherOptions())
+
+	key := dedupeKey{constraintUID: "conc-uid", workloadUID: "conc-wl"}
+
+	const goroutines = 100
+	results := make(chan bool, goroutines)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- d.tryMarkSeen(key)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	trueCount := 0
+	for r := range results {
+		if r {
+			trueCount++
+		}
+	}
+	assert.Equal(t, 1, trueCount, "exactly one goroutine should succeed for the same key")
+}
+
 func TestNsRateLimiter_NewNamespace(t *testing.T) {
 	limiter := newNsRateLimiter(100)
 
@@ -478,9 +520,47 @@ func TestNsRateLimiter_NewNamespace(t *testing.T) {
 	assert.True(t, limiter.Allow("ns2"))
 
 	// Verify separate limiters exist
-	limiter.mu.RLock()
+	limiter.mu.Lock()
 	assert.Len(t, limiter.limiters, 2)
-	limiter.mu.RUnlock()
+	limiter.mu.Unlock()
+}
+
+func TestNsRateLimiter_Evict(t *testing.T) {
+	limiter := newNsRateLimiter(100)
+
+	// Access two namespaces
+	limiter.Allow("active-ns")
+	limiter.Allow("stale-ns")
+
+	// Backdate the stale namespace's lastAccess
+	limiter.mu.Lock()
+	limiter.lastAccess["stale-ns"] = time.Now().Add(-2 * time.Hour)
+	limiter.mu.Unlock()
+
+	// Evict entries older than 1 hour
+	limiter.Evict(time.Hour)
+
+	limiter.mu.Lock()
+	_, activeExists := limiter.limiters["active-ns"]
+	_, staleExists := limiter.limiters["stale-ns"]
+	limiter.mu.Unlock()
+
+	assert.True(t, activeExists, "active namespace should be retained")
+	assert.False(t, staleExists, "stale namespace should be evicted")
+}
+
+func TestNsRateLimiter_EvictPreservesRecent(t *testing.T) {
+	limiter := newNsRateLimiter(100)
+
+	limiter.Allow("ns1")
+	limiter.Allow("ns2")
+
+	// Evict with 1 hour maxAge — both were just accessed, so neither should be evicted
+	limiter.Evict(time.Hour)
+
+	limiter.mu.Lock()
+	assert.Len(t, limiter.limiters, 2, "recently accessed namespaces should be retained")
+	limiter.mu.Unlock()
 }
 
 func TestDispatch_DifferentWorkloadSameConstraint(t *testing.T) {
