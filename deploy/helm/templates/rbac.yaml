@@ -11,6 +11,10 @@ rules:
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
+  # Patch workload annotations with constraint summaries.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["patch"]
   # Create Events on workloads to notify developers.
   - apiGroups: [""]
     resources: ["events"]

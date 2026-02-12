@@ -234,6 +234,7 @@ then create synthetic Warning events to trigger the correlation pipeline. Timeou
 account for the full pipeline: informer sync + adapter parse + indexer upsert +
 event watch + correlation + dispatch.
 
+
 ---
 
 ## Makefile Target Reference
