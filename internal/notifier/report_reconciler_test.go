@@ -614,6 +614,31 @@ func TestReportReconciler_OnIndexChange_ClusterScoped(t *testing.T) {
 	assert.False(t, rr.pendingTriggers[""])
 }
 
+func TestReportReconciler_OnIndexChange_ClusterScoped_NoAffectedNamespaces(t *testing.T) {
+	rr := &ReportReconciler{
+		logger:          zap.NewNop(),
+		pendingTriggers: make(map[string]bool),
+		lastReconcile:   make(map[string]time.Time),
+	}
+
+	event := indexer.IndexEvent{
+		Type: "upsert",
+		Constraint: types.Constraint{
+			Name:               "webhook-policy",
+			Namespace:          "", // cluster-scoped
+			AffectedNamespaces: nil,
+		},
+	}
+
+	rr.OnIndexChange(event)
+
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	// Should have set clusterWideTriggered instead of adding empty namespace trigger
+	assert.True(t, rr.clusterWideTriggered)
+	assert.Empty(t, rr.pendingTriggers)
+}
+
 func TestReportReconciler_ExtractResourceMetrics_NonMapEntry(t *testing.T) {
 	rr := &ReportReconciler{}
 

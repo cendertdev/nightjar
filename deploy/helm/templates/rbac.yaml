@@ -19,6 +19,16 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Patch workload annotations (Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, ReplicaSets, Pods).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch"]
   # Manage ConstraintReport CRDs.
   - apiGroups: ["nightjar.io"]
     resources: ["constraintreports", "constraintreports/status"]
