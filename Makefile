@@ -41,11 +41,19 @@ test-e2e: ## Run e2e tests (requires Kind cluster)
 	go test ./test/e2e/... -v -tags=e2e -timeout 30m
 
 .PHONY: e2e-setup
-e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controller for E2E
+e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controller + deps for E2E
 	@kind get clusters 2>/dev/null | grep -q nightjar || kind create cluster --name nightjar
 	kubectl apply -f config/crd/
 	kind load docker-image $(IMG) --name nightjar
 	kind load docker-image $(WEBHOOK_IMG) --name nightjar
+	@echo "--- Installing Gatekeeper ---"
+	@helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts 2>/dev/null || true
+	@helm repo update gatekeeper
+	helm upgrade --install gatekeeper gatekeeper/gatekeeper \
+		--namespace gatekeeper-system \
+		--create-namespace \
+		--wait --timeout 120s
+	@echo "--- Installing Nightjar ---"
 	helm upgrade --install nightjar deploy/helm/ \
 		--namespace nightjar-system \
 		--create-namespace \
@@ -65,15 +73,25 @@ e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controll
 e2e: test-e2e ## Alias for test-e2e
 
 .PHONY: e2e-teardown
-e2e-teardown: ## Tear down E2E environment (Kind cluster, CRDs, test namespaces)
+e2e-teardown: ## Tear down E2E environment (Kind cluster, CRDs, deps, test namespaces)
 	-helm uninstall nightjar --namespace nightjar-system 2>/dev/null
+	-helm uninstall gatekeeper --namespace gatekeeper-system 2>/dev/null
+	-kubectl delete ns gatekeeper-system 2>/dev/null
 	-kubectl delete -f config/crd/ 2>/dev/null
 	-kubectl delete ns -l nightjar-e2e=true 2>/dev/null
 	-kind delete cluster --name nightjar 2>/dev/null
 
 .PHONY: e2e-setup-dd
-e2e-setup-dd: docker-build-all ## Deploy controller for E2E on Docker Desktop Kubernetes
+e2e-setup-dd: docker-build-all ## Deploy controller + deps for E2E on Docker Desktop Kubernetes
 	kubectl apply -f config/crd/
+	@echo "--- Installing Gatekeeper ---"
+	@helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts 2>/dev/null || true
+	@helm repo update gatekeeper
+	helm upgrade --install gatekeeper gatekeeper/gatekeeper \
+		--namespace gatekeeper-system \
+		--create-namespace \
+		--wait --timeout 120s
+	@echo "--- Installing Nightjar ---"
 	helm upgrade --install nightjar deploy/helm/ \
 		--namespace nightjar-system \
 		--create-namespace \
@@ -92,6 +110,8 @@ e2e-setup-dd: docker-build-all ## Deploy controller for E2E on Docker Desktop Ku
 .PHONY: e2e-teardown-dd
 e2e-teardown-dd: ## Tear down E2E environment on Docker Desktop Kubernetes
 	-helm uninstall nightjar --namespace nightjar-system 2>/dev/null
+	-helm uninstall gatekeeper --namespace gatekeeper-system 2>/dev/null
+	-kubectl delete ns gatekeeper-system 2>/dev/null
 	-kubectl delete -f config/crd/ 2>/dev/null
 	-kubectl delete ns -l nightjar-e2e=true 2>/dev/null
 
