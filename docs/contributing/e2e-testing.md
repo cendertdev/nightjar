@@ -161,6 +161,11 @@ All helpers are in `helpers_test.go`:
 | `statusInt64(status, key)` | Safely extract int64 from status map field |
 | `statusConstraintNames(status)` | Extract constraint names from `status.constraints[]` |
 | `statusConstraintSources(status)` | Extract constraint sources from `status.constraints[]` |
+| `createTestDeployment(t, dynamicClient, ns, name)` | Create a pause:3.9 Deployment + cleanup func |
+| `waitForNightjarEvent(t, clientset, ns, workload, timeout)` | Poll for ConstraintNotification Events from nightjar-controller |
+| `getNightjarEvents(t, clientset, ns, workload)` | List Nightjar events (non-waiting, for counting) |
+| `createWarningEvent(t, clientset, ns, involved, kind)` | Create a synthetic Warning event for correlation testing |
+| `waitForWorkloadAnnotation(t, dynClient, ns, deploy, key, timeout)` | Poll until a workload annotation is present |
 
 ### Example: Testing a NetworkPolicy Constraint
 
@@ -211,6 +216,24 @@ func (s *E2ESuite) TestNetworkPolicyDiscovery() {
 
 These tests use `waitForReportCondition` with timeouts of 60s (create) and 45s
 (update) to account for the debounce + ticker + reconcile pipeline latency.
+
+### Correlation & Notification Tests
+
+`correlation_test.go` verifies the event correlation engine and notification pipeline:
+
+| Test | Verifies |
+|---|---|
+| `TestCorrelationEventCreated` | Warning event → Correlator → Dispatcher → ConstraintNotification Event with structured annotations |
+| `TestCorrelationDeduplication` | Same constraint-workload pair does not produce duplicate Events within the suppression window |
+| `TestCorrelationPrivacyScoping` | Cross-namespace constraint Events use summary-level privacy (name redacted, no cross-NS details) |
+| `TestWorkloadAnnotationPatched` | Deployment receives `nightjar.io/status`, `nightjar.io/constraints` JSON, severity counts |
+| `TestCorrelationRateLimiting` | Burst Warning events are throttled by the per-namespace rate limiter |
+
+These tests create a constraint first, wait for it to be indexed (via ConstraintReport),
+then create synthetic Warning events to trigger the correlation pipeline. Timeouts
+account for the full pipeline: informer sync + adapter parse + indexer upsert +
+event watch + correlation + dispatch.
+
 
 ---
 
