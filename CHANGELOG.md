@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- E2E tests for Gatekeeper adapter — constraint discovery, enforcement action mapping, match block parsing, multi-template dynamic discovery, constraint deletion lifecycle
+- E2E setup/teardown (`e2e-setup`, `e2e-setup-dd`) now installs and removes Gatekeeper as a test dependency
 - E2E tests for admission webhook warnings — deployment readiness, constraint warning capture, fail-open behavior, self-signed TLS certificate injection, PDB enforcement
 - Wire controller constraint query API (`GET /api/v1/constraints`) for webhook integration
 - E2E tests for correlation engine and Event notifications — event creation with structured annotations, deduplication, privacy scoping, workload annotation patching, rate limiting
