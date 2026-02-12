@@ -29,7 +29,7 @@ spec:
           image: "{{ .Values.admissionWebhook.image.repository }}:{{ .Values.admissionWebhook.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.admissionWebhook.image.pullPolicy }}
           command:
-            - /webhook
+            - /app
           args:
             - --addr=:8443
             - --controller-url=http://{{ include "nightjar.fullname" . }}.{{ .Release.Namespace }}.svc:8080

@@ -284,10 +284,27 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func RegisterHandlers(mux *http.ServeMux, idx *indexer.Indexer, logger *zap.Logger, opts CapabilitiesHandlerOptions) {
 	capHandler := NewCapabilitiesHandler(idx, logger, opts)
 	healthHandler := NewHealthHandler(idx, logger)
+	constraintsHandler := NewConstraintsHandler(idx, logger)
 
 	mux.Handle("/api/v1/capabilities", capHandler)
+	mux.Handle("/api/v1/constraints", constraintsHandler)
 	mux.Handle("/api/v1/health", healthHandler)
 	mux.Handle("/health", healthHandler)
+}
+
+// ExtraHandlers returns a map of path → http.Handler suitable for
+// controller-runtime's metricsserver.Options.ExtraHandlers.
+func ExtraHandlers(idx *indexer.Indexer, logger *zap.Logger, opts CapabilitiesHandlerOptions) map[string]http.Handler {
+	capHandler := NewCapabilitiesHandler(idx, logger, opts)
+	healthHandler := NewHealthHandler(idx, logger)
+	constraintsHandler := NewConstraintsHandler(idx, logger)
+
+	return map[string]http.Handler{
+		"/api/v1/capabilities": capHandler,
+		"/api/v1/constraints":  constraintsHandler,
+		"/api/v1/health":       healthHandler,
+		"/health":              healthHandler,
+	}
 }
 
 // unused but helps with type checking
