@@ -8,7 +8,6 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -67,22 +66,24 @@ func (n *nsRateLimiter) Allow(ns string) bool {
 
 // Dispatcher renders and dispatches constraint notifications.
 type Dispatcher struct {
-	logger      *zap.Logger
-	client      kubernetes.Interface
-	opts        DispatcherOptions
-	nsLimiter   *nsRateLimiter
-	dedupeCache map[dedupeKey]time.Time
-	mu          sync.RWMutex
+	logger       *zap.Logger
+	client       kubernetes.Interface
+	opts         DispatcherOptions
+	nsLimiter    *nsRateLimiter
+	eventBuilder *EventBuilder
+	dedupeCache  map[dedupeKey]time.Time
+	mu           sync.Mutex
 }
 
 // NewDispatcher creates a new Dispatcher.
 func NewDispatcher(client kubernetes.Interface, logger *zap.Logger, opts DispatcherOptions) *Dispatcher {
 	return &Dispatcher{
-		logger:      logger.Named("dispatcher"),
-		client:      client,
-		opts:        opts,
-		nsLimiter:   newNsRateLimiter(opts.RateLimitPerMinute),
-		dedupeCache: make(map[dedupeKey]time.Time),
+		logger:       logger.Named("dispatcher"),
+		client:       client,
+		opts:         opts,
+		nsLimiter:    newNsRateLimiter(opts.RateLimitPerMinute),
+		eventBuilder: NewEventBuilder(opts.RemediationContact),
+		dedupeCache:  make(map[dedupeKey]time.Time),
 	}
 }
 
@@ -101,16 +102,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n correlator.CorrelatedNotifi
 		return nil
 	}
 
-	// Dedupe check
+	// Dedupe check (atomic check-and-mark to avoid TOCTOU race)
 	key := dedupeKey{
 		constraintUID: string(n.Constraint.UID),
 		workloadUID:   fmt.Sprintf("%s/%s", ns, n.WorkloadName),
 	}
-	if d.isDuplicate(key) {
+	if !d.tryMarkSeen(key) {
 		return nil
 	}
 
-	// Render message at summary level (default for developers)
+	// Render message at summary level (per PRIVACY_MODEL.md: developer-facing events use summary)
 	message := d.RenderMessage(n.Constraint, types.DetailLevelSummary)
 
 	// Create K8s Event
@@ -119,7 +120,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n correlator.CorrelatedNotifi
 		return err
 	}
 
-	d.markSeen(key)
 	d.logger.Info("Dispatched notification",
 		zap.String("namespace", ns),
 		zap.String("workload", n.WorkloadName),
@@ -139,38 +139,25 @@ func (d *Dispatcher) DispatchDirect(ctx context.Context, c types.Constraint, ns,
 		constraintUID: string(c.UID),
 		workloadUID:   fmt.Sprintf("%s/%s", ns, workloadName),
 	}
-	if d.isDuplicate(key) {
+	if !d.tryMarkSeen(key) {
 		return nil
 	}
 
 	message := d.RenderMessage(c, level)
 
-	event := &corev1.Event{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "nightjar-constraint-",
-			Namespace:    ns,
-		},
-		InvolvedObject: corev1.ObjectReference{
-			Kind:      workloadKind,
-			Namespace: ns,
-			Name:      workloadName,
-		},
-		Reason:              "ConstraintNotification",
-		Message:             message,
-		Type:                "Warning",
-		Source:              corev1.EventSource{Component: "nightjar-controller"},
-		FirstTimestamp:      metav1.Now(),
-		LastTimestamp:       metav1.Now(),
-		ReportingController: "nightjar.io/controller",
-		ReportingInstance:   "nightjar",
+	workload := WorkloadRef{
+		Kind:      workloadKind,
+		Name:      workloadName,
+		Namespace: ns,
 	}
+
+	event := d.eventBuilder.BuildEvent(c, level, workload, message)
 
 	_, err := d.client.CoreV1().Events(ns).Create(ctx, event, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}
 
-	d.markSeen(key)
 	return nil
 }
 
@@ -245,48 +232,35 @@ func genericEffect(ct types.ConstraintType) string {
 	}
 }
 
-// createEvent creates a Kubernetes Event for the notification.
+// createEvent creates a Kubernetes Event for the notification using EventBuilder
+// to populate structured annotations for agent consumption.
 func (d *Dispatcher) createEvent(ctx context.Context, n correlator.CorrelatedNotification, message string) error {
-	event := &corev1.Event{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "nightjar-constraint-",
-			Namespace:    n.Namespace,
-		},
-		InvolvedObject: corev1.ObjectReference{
-			Kind:      n.WorkloadKind,
-			Namespace: n.Namespace,
-			Name:      n.WorkloadName,
-		},
-		Reason:              "ConstraintNotification",
-		Message:             message,
-		Type:                "Warning",
-		Source:              corev1.EventSource{Component: "nightjar-controller"},
-		FirstTimestamp:      metav1.Now(),
-		LastTimestamp:       metav1.Now(),
-		ReportingController: "nightjar.io/controller",
-		ReportingInstance:   "nightjar",
+	workload := WorkloadRef{
+		Kind:      n.WorkloadKind,
+		Name:      n.WorkloadName,
+		Namespace: n.Namespace,
 	}
+
+	event := d.eventBuilder.BuildEvent(n.Constraint, types.DetailLevelSummary, workload, message)
 
 	_, err := d.client.CoreV1().Events(n.Namespace).Create(ctx, event, metav1.CreateOptions{})
 	return err
 }
 
-// isDuplicate checks if this constraint-workload pair was recently notified.
-func (d *Dispatcher) isDuplicate(key dedupeKey) bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if seenAt, exists := d.dedupeCache[key]; exists {
-		window := time.Duration(d.opts.SuppressDuplicateMinutes) * time.Minute
-		return time.Since(seenAt) < window
-	}
-	return false
-}
-
-// markSeen records that a constraint-workload pair was notified.
-func (d *Dispatcher) markSeen(key dedupeKey) {
+// tryMarkSeen atomically checks if this constraint-workload pair was recently
+// notified and, if not, marks it as seen. Returns true if this is a new (non-duplicate)
+// notification that should be dispatched.
+func (d *Dispatcher) tryMarkSeen(key dedupeKey) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if seenAt, exists := d.dedupeCache[key]; exists {
+		window := time.Duration(d.opts.SuppressDuplicateMinutes) * time.Minute
+		if time.Since(seenAt) < window {
+			return false
+		}
+	}
 	d.dedupeCache[key] = time.Now()
+	return true
 }
 
 // cleanupDedupeCache periodically removes old entries.

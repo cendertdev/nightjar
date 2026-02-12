@@ -190,6 +190,7 @@ func TestDispatch_CreateEvent(t *testing.T) {
 			UID:            k8stypes.UID("test-uid"),
 			Name:           "test-constraint",
 			ConstraintType: types.ConstraintTypeNetworkEgress,
+			Severity:       types.SeverityWarning,
 		},
 		Namespace:    "team-alpha",
 		WorkloadName: "my-deployment",
@@ -406,9 +407,9 @@ func TestDispatcher_CleanupDedupeCache(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Verify the cache entry still exists (cleanup interval is 5 minutes, won't fire in 50ms)
-	d.mu.RLock()
+	d.mu.Lock()
 	_, exists := d.dedupeCache[oldKey]
-	d.mu.RUnlock()
+	d.mu.Unlock()
 	assert.True(t, exists, "Entry should still exist since cleanup interval is 5 minutes")
 }
 
@@ -427,7 +428,7 @@ func TestDispatcher_Start(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 }
 
-func TestDispatcher_IsDuplicate_Expired(t *testing.T) {
+func TestDispatcher_TryMarkSeen_Expired(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	opts := DefaultDispatcherOptions()
 	opts.SuppressDuplicateMinutes = 1 // 1 minute window
@@ -440,30 +441,33 @@ func TestDispatcher_IsDuplicate_Expired(t *testing.T) {
 	d.dedupeCache[key] = time.Now().Add(-2 * time.Minute)
 	d.mu.Unlock()
 
-	// Should NOT be a duplicate since the suppress window (1 minute) has expired
-	assert.False(t, d.isDuplicate(key), "Expired entry should not be treated as duplicate")
+	// Should succeed since the suppress window (1 minute) has expired
+	assert.True(t, d.tryMarkSeen(key), "Expired entry should allow re-marking")
 }
 
-func TestDispatcher_IsDuplicate_NotSeen(t *testing.T) {
+func TestDispatcher_TryMarkSeen_NotSeen(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	d := NewDispatcher(client, zap.NewNop(), DefaultDispatcherOptions())
 
 	key := dedupeKey{constraintUID: "new-uid", workloadUID: "new-wl"}
-	assert.False(t, d.isDuplicate(key), "Unseen entry should not be duplicate")
+	assert.True(t, d.tryMarkSeen(key), "Unseen entry should be marked successfully")
+
+	// Second call should be a duplicate
+	assert.False(t, d.tryMarkSeen(key), "Already-seen entry should be rejected")
 }
 
-func TestDispatcher_MarkSeen(t *testing.T) {
+func TestDispatcher_TryMarkSeen_Records(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	d := NewDispatcher(client, zap.NewNop(), DefaultDispatcherOptions())
 
 	key := dedupeKey{constraintUID: "mark-uid", workloadUID: "mark-wl"}
 
-	d.markSeen(key)
+	assert.True(t, d.tryMarkSeen(key), "First call should succeed")
 
-	d.mu.RLock()
+	d.mu.Lock()
 	_, exists := d.dedupeCache[key]
-	d.mu.RUnlock()
-	assert.True(t, exists, "markSeen should add key to dedupe cache")
+	d.mu.Unlock()
+	assert.True(t, exists, "tryMarkSeen should add key to dedupe cache")
 }
 
 func TestNsRateLimiter_NewNamespace(t *testing.T) {
@@ -502,7 +506,7 @@ func TestDispatch_DifferentWorkloadSameConstraint(t *testing.T) {
 
 	// Verify the deduplication logic: second workload should NOT be deduped
 	key := dedupeKey{constraintUID: "same-constraint", workloadUID: "team-alpha/workload-b"}
-	assert.False(t, d.isDuplicate(key), "Different workloads should not be deduplicated")
+	assert.True(t, d.tryMarkSeen(key), "Different workloads should not be deduplicated")
 }
 
 func TestDispatchDirect_FullLevel(t *testing.T) {
