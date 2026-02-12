@@ -6,6 +6,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -132,25 +134,6 @@ func createTestNamespace(t *testing.T, clientset kubernetes.Interface) (string, 
 		}
 	}
 	return name, cleanup
-}
-
-// deleteNamespace deletes a namespace and waits for it to be fully removed.
-func deleteNamespace(t *testing.T, clientset kubernetes.Interface, name string, timeout time.Duration) {
-	t.Helper()
-	err := clientset.CoreV1().Namespaces().Delete(context.Background(), name, metav1.DeleteOptions{})
-	if err != nil {
-		t.Logf("Warning: failed to delete namespace %s: %v", name, err)
-		return
-	}
-
-	waitForCondition(t, timeout, defaultPollInterval, func() (bool, error) {
-		_, err := clientset.CoreV1().Namespaces().Get(context.Background(), name, metav1.GetOptions{})
-		if err != nil {
-			// Namespace is gone.
-			return true, nil
-		}
-		return false, nil
-	})
 }
 
 // waitForEvent polls for Kubernetes Events in the given namespace that reference
@@ -324,8 +307,111 @@ func guessResource(kind string) string {
 		return "configmaps"
 	case "Pod":
 		return "pods"
+	case "ValidatingWebhookConfiguration":
+		return "validatingwebhookconfigurations"
+	case "MutatingWebhookConfiguration":
+		return "mutatingwebhookconfigurations"
+	case "CustomResourceDefinition":
+		return "customresourcedefinitions"
 	default:
 		// Best-effort: lowercase + "s"
 		return strings.ToLower(kind) + "s"
 	}
+}
+
+// constraintSummary is a compact representation of a constraint for JSON deserialization.
+// Mirrors notifier.ConstraintSummary.
+type constraintSummary struct {
+	Type     string `json:"type"`
+	Severity string `json:"severity"`
+	Name     string `json:"name"`
+	Source   string `json:"source"`
+}
+
+// createSentinelDeployment creates a minimal Deployment in the given namespace
+// that the workload annotator can target. Returns a cleanup function.
+func createSentinelDeployment(t *testing.T, clientset kubernetes.Interface, namespace, name string) func() {
+	t.Helper()
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": name},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": name},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:    "pause",
+							Image:   "registry.k8s.io/pause:3.9",
+							Command: []string{"/pause"},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := clientset.AppsV1().Deployments(namespace).Create(
+		context.Background(), deploy, metav1.CreateOptions{},
+	)
+	require.NoError(t, err, "failed to create sentinel deployment %s/%s", namespace, name)
+	t.Logf("Created sentinel deployment: %s/%s", namespace, name)
+
+	return func() {
+		err := clientset.AppsV1().Deployments(namespace).Delete(
+			context.Background(), name, metav1.DeleteOptions{},
+		)
+		if err != nil {
+			t.Logf("Warning: failed to delete sentinel deployment %s/%s: %v", namespace, name, err)
+		}
+	}
+}
+
+// waitForWorkloadAnnotation polls until the given annotation key appears on a
+// Deployment. Returns the annotation value.
+func waitForWorkloadAnnotation(t *testing.T, dynamicClient dynamic.Interface, namespace, deploymentName, annotationKey string, timeout time.Duration) string {
+	t.Helper()
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	var value string
+
+	waitForCondition(t, timeout, defaultPollInterval, func() (bool, error) {
+		obj, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(
+			context.Background(), deploymentName, metav1.GetOptions{},
+		)
+		if err != nil {
+			return false, fmt.Errorf("get deployment: %w", err)
+		}
+		annots := obj.GetAnnotations()
+		if annots == nil {
+			return false, nil
+		}
+		v, ok := annots[annotationKey]
+		if !ok {
+			return false, nil
+		}
+		value = v
+		return true, nil
+	})
+	return value
+}
+
+// getWorkloadConstraints parses the nightjar.io/constraints JSON annotation
+// from a Deployment and returns the decoded constraint summaries.
+func getWorkloadConstraints(t *testing.T, dynamicClient dynamic.Interface, namespace, deploymentName string, timeout time.Duration) []constraintSummary {
+	t.Helper()
+	raw := waitForWorkloadAnnotation(t, dynamicClient, namespace, deploymentName,
+		annotations.WorkloadConstraints, timeout)
+
+	var summaries []constraintSummary
+	require.NoError(t, json.Unmarshal([]byte(raw), &summaries),
+		"failed to parse constraints JSON: %s", raw)
+	return summaries
 }

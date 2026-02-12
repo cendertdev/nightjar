@@ -1,0 +1,672 @@
+//go:build e2e
+// +build e2e
+
+// Package e2e contains end-to-end tests for Nightjar's core discovery engine
+// and native Kubernetes adapters. These tests require a running cluster with the
+// controller deployed (via make e2e-setup or make e2e-setup-dd).
+//
+// The rescan interval should be set to 30s in the E2E deployment for the
+// periodic rescan test to complete in a reasonable time.
+//
+// Each discovery test creates its own namespace to avoid interference from the
+// workload annotator's 30-second namespace workload cache. When tests share a
+// namespace, cleanup-triggered cache refreshes can cause subsequent tests'
+// sentinels to be invisible to the annotator.
+package e2e
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/rand"
+
+	"github.com/nightjarctl/nightjar/internal/annotations"
+)
+
+// TestNetworkPolicyDiscovery verifies that deploying a NetworkPolicy causes
+// it to appear in the constraint index and annotate workloads within 30s.
+func (s *E2ESuite) TestNetworkPolicyDiscovery() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-netpol-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	// Create a deny-all egress NetworkPolicy.
+	np := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.k8s.io/v1",
+			"kind":       "NetworkPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-deny-egress",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"podSelector": map[string]interface{}{},
+				"policyTypes": []interface{}{"Egress"},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, np)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies",
+		}, ns, "e2e-deny-egress")
+	})
+
+	// Wait for workload annotation to appear.
+	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
+	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment")
+
+	// Verify at least one NetworkEgress constraint exists.
+	found := false
+	for _, c := range constraints {
+		if c.Type == "NetworkEgress" {
+			found = true
+			t.Logf("Found NetworkEgress constraint: name=%s source=%s", c.Name, c.Source)
+			break
+		}
+	}
+	require.True(t, found, "expected NetworkEgress constraint in workload annotations, got: %+v", constraints)
+}
+
+// TestResourceQuotaDiscovery verifies that deploying a ResourceQuota causes a
+// ResourceLimit constraint to appear in workload annotations.
+func (s *E2ESuite) TestResourceQuotaDiscovery() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-quota-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	rq := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ResourceQuota",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-resource-quota",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"hard": map[string]interface{}{
+					"cpu":    "10",
+					"memory": "10Gi",
+					"pods":   "20",
+				},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, rq)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "", Version: "v1", Resource: "resourcequotas",
+		}, ns, "e2e-resource-quota")
+	})
+
+	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
+	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment")
+
+	found := false
+	for _, c := range constraints {
+		if c.Type == "ResourceLimit" && c.Source == "resourcequotas" {
+			found = true
+			t.Logf("Found ResourceLimit constraint from ResourceQuota: name=%s severity=%s", c.Name, c.Severity)
+			break
+		}
+	}
+	require.True(t, found, "expected ResourceLimit constraint from resourcequotas, got: %+v", constraints)
+}
+
+// TestLimitRangeDiscovery verifies that deploying a LimitRange causes a
+// ResourceLimit constraint with default/min/max values to be indexed.
+func (s *E2ESuite) TestLimitRangeDiscovery() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-lr-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	lr := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "LimitRange",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-limit-range",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"limits": []interface{}{
+					map[string]interface{}{
+						"type": "Container",
+						"default": map[string]interface{}{
+							"cpu":    "500m",
+							"memory": "256Mi",
+						},
+						"defaultRequest": map[string]interface{}{
+							"cpu":    "100m",
+							"memory": "128Mi",
+						},
+						"min": map[string]interface{}{
+							"cpu":    "50m",
+							"memory": "64Mi",
+						},
+						"max": map[string]interface{}{
+							"cpu":    "2",
+							"memory": "1Gi",
+						},
+					},
+				},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, lr)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "", Version: "v1", Resource: "limitranges",
+		}, ns, "e2e-limit-range")
+	})
+
+	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
+	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment")
+
+	found := false
+	for _, c := range constraints {
+		if c.Type == "ResourceLimit" && c.Source == "limitranges" {
+			found = true
+			t.Logf("Found ResourceLimit constraint from LimitRange: name=%s severity=%s", c.Name, c.Severity)
+			break
+		}
+	}
+	require.True(t, found, "expected ResourceLimit constraint from limitranges, got: %+v", constraints)
+}
+
+// TestValidatingWebhookDiscovery verifies that creating a ValidatingWebhookConfiguration
+// causes an Admission constraint to be discovered and indexed.
+func (s *E2ESuite) TestValidatingWebhookDiscovery() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-vwh-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	webhookName := "e2e-validating-webhook-" + rand.String(5)
+	vwh := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "admissionregistration.k8s.io/v1",
+			"kind":       "ValidatingWebhookConfiguration",
+			"metadata": map[string]interface{}{
+				"name": webhookName,
+			},
+			"webhooks": []interface{}{
+				map[string]interface{}{
+					"name":                    "test-validating.e2e.example.com",
+					"admissionReviewVersions": []interface{}{"v1"},
+					"sideEffects":             "None",
+					"failurePolicy":           "Ignore",
+					"clientConfig": map[string]interface{}{
+						"url": "https://localhost:9443/validate",
+					},
+					"rules": []interface{}{
+						map[string]interface{}{
+							"apiGroups":   []interface{}{""},
+							"apiVersions": []interface{}{"v1"},
+							"operations":  []interface{}{"CREATE", "UPDATE"},
+							"resources":   []interface{}{"pods"},
+						},
+					},
+				},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, vwh)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations",
+		}, "", webhookName)
+	})
+
+	// Cluster-scoped constraints have Namespace="" so OnIndexChange doesn't
+	// queue a namespace update for them. Create a namespace-scoped trigger
+	// (NetworkPolicy) so the annotator refreshes this namespace; ByNamespace
+	// will then include cluster-scoped webhook constraints too.
+	// Brief pause to ensure the webhook informer has indexed the resource
+	// before the trigger fires (avoids race between informers).
+	time.Sleep(5 * time.Second)
+	triggerNP := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.k8s.io/v1",
+			"kind":       "NetworkPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-trigger-vwh",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"podSelector": map[string]interface{}{},
+				"policyTypes": []interface{}{"Ingress"},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, triggerNP)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies",
+		}, ns, "e2e-trigger-vwh")
+	})
+
+	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
+	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment")
+
+	// Match on specific webhook name to avoid false positives from system webhooks.
+	found := false
+	for _, c := range constraints {
+		if c.Type == "Admission" && c.Source == "validatingwebhookconfigurations" && strings.Contains(c.Name, webhookName) {
+			found = true
+			t.Logf("Found Admission constraint from ValidatingWebhookConfiguration: name=%s", c.Name)
+			break
+		}
+	}
+	require.True(t, found, "expected Admission constraint from validatingwebhookconfigurations containing %q, got: %+v", webhookName, constraints)
+}
+
+// TestMutatingWebhookDiscovery verifies that creating a MutatingWebhookConfiguration
+// causes an Admission constraint to be discovered and indexed.
+func (s *E2ESuite) TestMutatingWebhookDiscovery() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-mwh-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	webhookName := "e2e-mutating-webhook-" + rand.String(5)
+	mwh := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "admissionregistration.k8s.io/v1",
+			"kind":       "MutatingWebhookConfiguration",
+			"metadata": map[string]interface{}{
+				"name": webhookName,
+			},
+			"webhooks": []interface{}{
+				map[string]interface{}{
+					"name":                    "test-mutating.e2e.example.com",
+					"admissionReviewVersions": []interface{}{"v1"},
+					"sideEffects":             "None",
+					"failurePolicy":           "Ignore",
+					"clientConfig": map[string]interface{}{
+						"url": "https://localhost:9443/mutate",
+					},
+					"rules": []interface{}{
+						map[string]interface{}{
+							"apiGroups":   []interface{}{""},
+							"apiVersions": []interface{}{"v1"},
+							"operations":  []interface{}{"CREATE"},
+							"resources":   []interface{}{"pods"},
+						},
+					},
+				},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, mwh)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations",
+		}, "", webhookName)
+	})
+
+	// Cluster-scoped constraints need a namespace-scoped trigger to force the
+	// workload annotator to process this namespace (see TestValidatingWebhookDiscovery).
+	time.Sleep(5 * time.Second)
+	triggerNP := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.k8s.io/v1",
+			"kind":       "NetworkPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-trigger-mwh",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"podSelector": map[string]interface{}{},
+				"policyTypes": []interface{}{"Ingress"},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, triggerNP)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies",
+		}, ns, "e2e-trigger-mwh")
+	})
+
+	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
+	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment")
+
+	// Match on specific webhook name to avoid false positives from system webhooks.
+	found := false
+	for _, c := range constraints {
+		if c.Type == "Admission" && c.Source == "mutatingwebhookconfigurations" && strings.Contains(c.Name, webhookName) {
+			found = true
+			t.Logf("Found Admission constraint from MutatingWebhookConfiguration: name=%s", c.Name)
+			break
+		}
+	}
+	require.True(t, found, "expected Admission constraint from mutatingwebhookconfigurations containing %q, got: %+v", webhookName, constraints)
+}
+
+// TestNightjarWebhookFiltered verifies that a ValidatingWebhookConfiguration
+// with individual webhook entry names containing "nightjar" is filtered out
+// and does NOT produce a constraint.
+//
+// To avoid a vacuously passing test (where the annotator simply hasn't run yet),
+// this test creates both a non-nightjar webhook (baseline) and a nightjar-owned
+// webhook. It waits for the baseline to appear in constraints, then verifies the
+// nightjar-owned webhook was excluded.
+func (s *E2ESuite) TestNightjarWebhookFiltered() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-njwh-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	// Create a baseline (non-nightjar) webhook so we can confirm the annotator ran.
+	baselineName := "e2e-baseline-webhook-" + rand.String(5)
+	baselineVwh := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "admissionregistration.k8s.io/v1",
+			"kind":       "ValidatingWebhookConfiguration",
+			"metadata": map[string]interface{}{
+				"name": baselineName,
+			},
+			"webhooks": []interface{}{
+				map[string]interface{}{
+					"name":                    "baseline.e2e.example.com",
+					"admissionReviewVersions": []interface{}{"v1"},
+					"sideEffects":             "None",
+					"failurePolicy":           "Ignore",
+					"clientConfig": map[string]interface{}{
+						"url": "https://localhost:9443/baseline",
+					},
+					"rules": []interface{}{
+						map[string]interface{}{
+							"apiGroups":   []interface{}{""},
+							"apiVersions": []interface{}{"v1"},
+							"operations":  []interface{}{"CREATE"},
+							"resources":   []interface{}{"pods"},
+						},
+					},
+				},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, baselineVwh)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations",
+		}, "", baselineName)
+	})
+
+	// Create the nightjar-owned webhook that should be filtered.
+	nightjarWHName := "e2e-nightjar-webhook-" + rand.String(5)
+	nightjarVwh := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "admissionregistration.k8s.io/v1",
+			"kind":       "ValidatingWebhookConfiguration",
+			"metadata": map[string]interface{}{
+				"name": nightjarWHName,
+			},
+			"webhooks": []interface{}{
+				map[string]interface{}{
+					// Individual webhook entry name contains "nightjar" — should be filtered.
+					"name":                    "nightjar-admission.nightjar.io",
+					"admissionReviewVersions": []interface{}{"v1"},
+					"sideEffects":             "None",
+					"failurePolicy":           "Ignore",
+					"clientConfig": map[string]interface{}{
+						"url": "https://localhost:9443/validate",
+					},
+					"rules": []interface{}{
+						map[string]interface{}{
+							"apiGroups":   []interface{}{""},
+							"apiVersions": []interface{}{"v1"},
+							"operations":  []interface{}{"CREATE"},
+							"resources":   []interface{}{"pods"},
+						},
+					},
+				},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, nightjarVwh)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations",
+		}, "", nightjarWHName)
+	})
+
+	// Cluster-scoped constraints need a namespace-scoped trigger to force the
+	// workload annotator to process this namespace.
+	time.Sleep(5 * time.Second)
+	triggerNP := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "networking.k8s.io/v1",
+			"kind":       "NetworkPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-trigger-njwh",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"podSelector": map[string]interface{}{},
+				"policyTypes": []interface{}{"Ingress"},
+			},
+		},
+	}
+	applyUnstructured(t, s.dynamicClient, triggerNP)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, schema.GroupVersionResource{
+			Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies",
+		}, ns, "e2e-trigger-njwh")
+	})
+
+	// Wait for the baseline constraint to appear — proves the annotator has run.
+	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
+	require.NotEmpty(t, constraints, "no constraints found; annotator may not have run")
+
+	baselineFound := false
+	for _, c := range constraints {
+		if c.Type == "Admission" && strings.Contains(c.Name, baselineName) {
+			baselineFound = true
+			break
+		}
+	}
+	require.True(t, baselineFound, "baseline webhook constraint not found; annotator may not have processed it yet: %+v", constraints)
+
+	// Now verify no constraint from the nightjar-owned webhook exists.
+	for _, c := range constraints {
+		require.False(t, strings.Contains(c.Name, nightjarWHName),
+			"nightjar-owned webhook should have been filtered, but found constraint: %+v", c)
+	}
+	t.Log("Confirmed: nightjar-owned webhook was correctly filtered")
+}
+
+// TestPeriodicRescanDiscovery verifies that when a new CRD with a policy-like
+// name is installed after the controller is running, the periodic rescan picks
+// it up and the generic adapter parses instances of it.
+func (s *E2ESuite) TestPeriodicRescanDiscovery() {
+	t := s.T()
+
+	ns, cleanupNS := createTestNamespace(t, s.clientset)
+	t.Cleanup(cleanupNS)
+
+	sentinelName := "sentinel-rescan-" + rand.String(5)
+	cleanup := createSentinelDeployment(t, s.clientset, ns, sentinelName)
+	t.Cleanup(cleanup)
+	waitForDeploymentReady(t, s.clientset, ns, sentinelName, 60*time.Second)
+
+	// Create a CRD with a policy-like name so the discovery engine picks it up
+	// via the "policy" name hint.
+	crdName := "securitypolicies.e2e.nightjar.io"
+	crd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.k8s.io/v1",
+			"kind":       "CustomResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": crdName,
+			},
+			"spec": map[string]interface{}{
+				"group": "e2e.nightjar.io",
+				"names": map[string]interface{}{
+					"plural":   "securitypolicies",
+					"singular": "securitypolicy",
+					"kind":     "SecurityPolicy",
+				},
+				"scope": "Namespaced",
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":    "v1",
+						"served":  true,
+						"storage": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type":                                 "object",
+										"x-kubernetes-preserve-unknown-fields": true,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	crdGVR := schema.GroupVersionResource{
+		Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions",
+	}
+	// Delete any leftover CRD from a previous run before creating.
+	_ = s.dynamicClient.Resource(crdGVR).Delete(context.Background(), crdName, metav1.DeleteOptions{})
+	time.Sleep(2 * time.Second)
+	applyUnstructured(t, s.dynamicClient, crd)
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, crdGVR, "", crdName)
+	})
+
+	// Wait for the CRD to be established.
+	waitForCondition(t, 30*time.Second, defaultPollInterval, func() (bool, error) {
+		obj, err := s.dynamicClient.Resource(crdGVR).Get(
+			context.Background(), crdName, metav1.GetOptions{},
+		)
+		if err != nil {
+			return false, err
+		}
+		conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+		for _, condRaw := range conditions {
+			cond, ok := condRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cond["type"] == "Established" && cond["status"] == "True" {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+
+	// Create an instance of the custom CRD. The discovery engine's periodic
+	// rescan (30s interval in E2E) will pick up the new CRD and start an
+	// informer. The CR creation may happen before the informer is watching,
+	// but the informer's initial list will catch it.
+	crGVR := schema.GroupVersionResource{
+		Group: "e2e.nightjar.io", Version: "v1", Resource: "securitypolicies",
+	}
+	cr := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "e2e.nightjar.io/v1",
+			"kind":       "SecurityPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "e2e-security-policy",
+				"namespace": ns,
+			},
+			"spec": map[string]interface{}{
+				"selector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{
+						"app": sentinelName,
+					},
+				},
+				"rules": []interface{}{
+					map[string]interface{}{
+						"action": "deny",
+						"from":   "external",
+					},
+				},
+			},
+		},
+	}
+
+	// The CRD may take a moment to become fully served after "Established".
+	// Retry creation briefly to handle the API registration delay.
+	var createErr error
+	waitForCondition(t, 15*time.Second, defaultPollInterval, func() (bool, error) {
+		_, createErr = s.dynamicClient.Resource(crGVR).Namespace(ns).Create(
+			context.Background(), cr, metav1.CreateOptions{},
+		)
+		return createErr == nil, nil
+	})
+	require.NoError(t, createErr, "failed to create SecurityPolicy CR")
+	t.Cleanup(func() {
+		deleteUnstructured(t, s.dynamicClient, crGVR, ns, "e2e-security-policy")
+	})
+
+	// Wait for the generic adapter to pick it up and annotate the workload.
+	// Use a longer timeout (120s) to cover up to two rescan cycles plus
+	// informer sync and annotation processing time.
+	t.Log("Waiting for periodic rescan to discover the new CRD and index the CR...")
+	raw := waitForWorkloadAnnotation(t, s.dynamicClient, ns, sentinelName,
+		annotations.WorkloadConstraints, 120*time.Second)
+
+	var constraints []constraintSummary
+	require.NoError(t, json.Unmarshal([]byte(raw), &constraints),
+		"failed to parse constraints JSON: %s", raw)
+	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment after rescan")
+
+	found := false
+	for _, c := range constraints {
+		if c.Source == "securitypolicies" {
+			found = true
+			t.Logf("Found constraint from generic adapter: type=%s name=%s source=%s", c.Type, c.Name, c.Source)
+			break
+		}
+	}
+	require.True(t, found, "expected constraint from securitypolicies (generic adapter), got: %+v", constraints)
+}
