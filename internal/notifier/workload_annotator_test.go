@@ -455,6 +455,99 @@ func TestWorkloadAnnotator_OnIndexChange_ClusterScoped(t *testing.T) {
 	assert.Equal(t, 3, len(wa.pending))
 }
 
+func TestWorkloadAnnotator_OnIndexChange_ClusterScoped_NoAffectedNamespaces(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	event := indexer.IndexEvent{
+		Type: "upsert",
+		Constraint: types.Constraint{
+			Name:               "webhook-policy",
+			Namespace:          "", // cluster-scoped
+			AffectedNamespaces: nil,
+		},
+	}
+
+	wa.OnIndexChange(event)
+
+	// Should have 1 pending update: the cluster-wide sentinel
+	require.Equal(t, 1, len(wa.pending))
+	update := <-wa.pending
+	assert.Equal(t, clusterWideSentinel, update.key.Namespace)
+}
+
+func TestWorkloadAnnotator_ProcessUpdate_ClusterWideSentinel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "", Version: "v1", Resource: "namespaces"}: "NamespaceList",
+	}
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+
+	// Create namespaces
+	nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	for _, name := range []string{"team-a", "team-b", "kube-system"} {
+		ns := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Namespace",
+				"metadata": map[string]interface{}{
+					"name": name,
+				},
+			},
+		}
+		_, err := dynClient.Resource(nsGVR).Create(context.Background(), ns, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	idx := indexer.New(nil)
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), WorkloadAnnotatorOptions{
+		DebounceDuration: 1 * time.Millisecond,
+		Workers:          1,
+	})
+
+	// Process the cluster-wide sentinel
+	update := pendingUpdate{
+		key:       workloadKey{Namespace: clusterWideSentinel},
+		scheduled: time.Now(),
+	}
+
+	wa.processUpdate(context.Background(), update)
+
+	// Should have queued per-namespace updates for all 3 namespaces
+	var queued []string
+	for {
+		select {
+		case u := <-wa.pending:
+			queued = append(queued, u.key.Namespace)
+		default:
+			goto done
+		}
+	}
+done:
+
+	assert.Len(t, queued, 3)
+	assert.ElementsMatch(t, []string{"team-a", "team-b", "kube-system"}, queued)
+}
+
+func TestWorkloadAnnotator_ListNamespaceWorkloads_EmptyNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
+	idx := indexer.New(nil)
+
+	wa := NewWorkloadAnnotator(dynClient, idx, zap.NewNop(), DefaultWorkloadAnnotatorOptions())
+
+	// Empty namespace should return nil without making API calls
+	result, err := wa.listNamespaceWorkloads(context.Background(), "")
+	assert.NoError(t, err)
+	assert.Nil(t, result)
+
+	// No API calls should have been made
+	assert.Empty(t, dynClient.Actions())
+}
+
 func TestWorkloadAnnotator_QueueWorkloadUpdate(t *testing.T) {
 	scheme := runtime.NewScheme()
 	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)

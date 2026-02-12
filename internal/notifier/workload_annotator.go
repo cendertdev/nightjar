@@ -152,7 +152,17 @@ func (wa *WorkloadAnnotator) OnIndexChange(event indexer.IndexEvent) {
 			wa.queueNamespaceUpdate(c.Namespace)
 		}
 	}
+
+	// Cluster-scoped constraint with no explicit affected namespaces:
+	// queue a cluster-wide update so the worker lists all namespaces.
+	if c.Namespace == "" && len(seen) == 0 {
+		wa.queueClusterWideUpdate()
+	}
 }
+
+// clusterWideSentinel is a special namespace value indicating that a cluster-wide
+// update should list all namespaces and queue per-namespace updates.
+const clusterWideSentinel = "\x00cluster-wide"
 
 // queueNamespaceUpdate queues a namespace-level update. The worker resolves this
 // into individual workload updates via listNamespaceWorkloads.
@@ -166,9 +176,26 @@ func (wa *WorkloadAnnotator) queueNamespaceUpdate(namespace string) {
 	}
 }
 
+// queueClusterWideUpdate queues a sentinel update that causes the worker to list
+// all namespaces and queue a per-namespace update for each.
+func (wa *WorkloadAnnotator) queueClusterWideUpdate() {
+	key := workloadKey{Namespace: clusterWideSentinel}
+
+	select {
+	case wa.pending <- pendingUpdate{key: key, scheduled: time.Now()}:
+	default:
+		wa.logger.Warn("Pending queue full, dropping cluster-wide update")
+	}
+}
+
 // listNamespaceWorkloads returns workload keys for Deployments, StatefulSets, and
 // DaemonSets in the given namespace. Results are cached for nsWorkloadCacheTTL.
+// Returns an empty slice for empty namespace to avoid listing workloads across all namespaces.
 func (wa *WorkloadAnnotator) listNamespaceWorkloads(ctx context.Context, namespace string) ([]workloadKey, error) {
+	if namespace == "" {
+		return nil, nil
+	}
+
 	wa.mu.Lock()
 	cached, ok := wa.nsCache[namespace]
 	wa.mu.Unlock()
@@ -201,6 +228,21 @@ func (wa *WorkloadAnnotator) listNamespaceWorkloads(ctx context.Context, namespa
 	wa.mu.Unlock()
 
 	return result, nil
+}
+
+// listAllNamespaces returns all namespace names from the cluster.
+func (wa *WorkloadAnnotator) listAllNamespaces(ctx context.Context) ([]string, error) {
+	nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	list, err := wa.client.Resource(nsGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var namespaces []string
+	for _, item := range list.Items {
+		namespaces = append(namespaces, item.GetName())
+	}
+	return namespaces, nil
 }
 
 // QueueWorkloadUpdate queues an annotation update for a specific workload.
@@ -248,6 +290,19 @@ func (wa *WorkloadAnnotator) worker(ctx context.Context, workerID int) {
 // processUpdate handles a single workload annotation update.
 func (wa *WorkloadAnnotator) processUpdate(ctx context.Context, update pendingUpdate) {
 	key := update.key
+
+	// Cluster-wide sentinel: list all namespaces and queue per-namespace updates.
+	if key.Namespace == clusterWideSentinel {
+		namespaces, err := wa.listAllNamespaces(ctx)
+		if err != nil {
+			wa.logger.Error("Failed to list namespaces for cluster-wide update", zap.Error(err))
+			return
+		}
+		for _, ns := range namespaces {
+			wa.queueNamespaceUpdate(ns)
+		}
+		return
+	}
 
 	// Namespace-level update: resolve to individual workload updates
 	if key.Kind == "" || key.Name == "" {

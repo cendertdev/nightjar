@@ -53,9 +53,10 @@ type ReportReconciler struct {
 	dynamicClient      dynamic.Interface
 	opts               ReportReconcilerOptions
 
-	mu              sync.Mutex
-	lastReconcile   map[string]time.Time
-	pendingTriggers map[string]bool
+	mu                   sync.Mutex
+	lastReconcile        map[string]time.Time
+	pendingTriggers      map[string]bool
+	clusterWideTriggered bool
 }
 
 // NewReportReconciler creates a new ReportReconciler.
@@ -118,6 +119,15 @@ func (rr *ReportReconciler) OnIndexChange(event indexer.IndexEvent) {
 		namespaces = append(namespaces, c.Namespace)
 	}
 
+	// Cluster-scoped constraint with no explicit affected namespaces:
+	// mark for cluster-wide reconciliation.
+	if c.Namespace == "" && len(namespaces) == 0 {
+		rr.mu.Lock()
+		rr.clusterWideTriggered = true
+		rr.mu.Unlock()
+		return
+	}
+
 	rr.mu.Lock()
 	for _, ns := range namespaces {
 		rr.pendingTriggers[ns] = true
@@ -129,8 +139,23 @@ func (rr *ReportReconciler) OnIndexChange(event indexer.IndexEvent) {
 func (rr *ReportReconciler) processPendingTriggers(ctx context.Context) {
 	rr.mu.Lock()
 	triggers := rr.pendingTriggers
+	clusterWide := rr.clusterWideTriggered
 	rr.pendingTriggers = make(map[string]bool)
+	rr.clusterWideTriggered = false
 	rr.mu.Unlock()
+
+	// Cluster-wide trigger: list all namespaces and add them as triggers.
+	if clusterWide && rr.dynamicClient != nil {
+		nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+		list, err := rr.dynamicClient.Resource(nsGVR).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			rr.logger.Error("Failed to list namespaces for cluster-wide reconcile", zap.Error(err))
+		} else {
+			for _, item := range list.Items {
+				triggers[item.GetName()] = true
+			}
+		}
+	}
 
 	for ns := range triggers {
 		// Check debounce
