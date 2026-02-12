@@ -155,6 +155,12 @@ All helpers are in `helpers_test.go`:
 | `applyUnstructured(t, dynamicClient, obj)` | Create an unstructured object |
 | `deleteUnstructured(t, dynamicClient, gvr, ns, name)` | Delete an unstructured object |
 | `getControllerLogs(t, clientset, tailLines)` | Retrieve controller pod logs |
+| `getConstraintReport(t, dynClient, ns, timeout)` | Poll for ConstraintReport "constraints" via dynamic client |
+| `getReportStatus(report)` | Extract `.status` map from unstructured report (nil-safe) |
+| `waitForReportCondition(t, dynClient, ns, timeout, condFn)` | Poll until condition is true on report status |
+| `statusInt64(status, key)` | Safely extract int64 from status map field |
+| `statusConstraintNames(status)` | Extract constraint names from `status.constraints[]` |
+| `statusConstraintSources(status)` | Extract constraint sources from `status.constraints[]` |
 
 ### Example: Testing a NetworkPolicy Constraint
 
@@ -189,6 +195,22 @@ func (s *E2ESuite) TestNetworkPolicyDiscovery() {
     )
 }
 ```
+
+### Constraint Report Tests
+
+`constraint_report_test.go` verifies the indexer → report reconciler pipeline:
+
+| Test | Verifies |
+|---|---|
+| `TestConstraintReportCreatedOnConstraint` | Creating a NetworkPolicy triggers a ConstraintReport with correct counts and machineReadable |
+| `TestConstraintReportUpdateOnConstraintChange` | Updating a ResourceQuota re-reconciles the report (lastUpdated changes) |
+| `TestConstraintReportDeleteConstraint` | Deleting a constraint removes it from the report (by name) |
+| `TestConstraintReportMachineReadable` | machineReadable section has schemaVersion, detailLevel, structured entries with UID/SourceRef/Remediation |
+| `TestConstraintReportSeverityCounts` | Multiple constraints produce correct severity counts (Warning + Info) |
+| `TestConstraintReportClusterScopedConstraint` | Cluster-scoped webhook appears in the test namespace's report |
+
+These tests use `waitForReportCondition` with timeouts of 60s (create) and 45s
+(update) to account for the debounce + ticker + reconcile pipeline latency.
 
 ---
 
