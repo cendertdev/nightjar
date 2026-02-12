@@ -41,8 +41,9 @@ test-e2e: ## Run e2e tests (requires Kind cluster)
 	go test ./test/e2e/... -v -tags=e2e -timeout 30m
 
 .PHONY: e2e-setup
-e2e-setup: docker-build-all install ## Create Kind cluster, load images, deploy controller for E2E
+e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controller for E2E
 	@kind get clusters 2>/dev/null | grep -q nightjar || kind create cluster --name nightjar
+	kubectl apply -f config/crd/
 	kind load docker-image $(IMG) --name nightjar
 	kind load docker-image $(WEBHOOK_IMG) --name nightjar
 	helm upgrade --install nightjar deploy/helm/ \

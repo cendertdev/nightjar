@@ -76,7 +76,11 @@ func waitForControllerReady(t *testing.T, clientset kubernetes.Interface, timeou
 			return false, fmt.Errorf("get deployment: %w", err)
 		}
 		if deploy.Status.ReadyReplicas > 0 {
-			t.Logf("Controller ready: %d/%d replicas", deploy.Status.ReadyReplicas, *deploy.Spec.Replicas)
+			var desired int32 = 1
+			if deploy.Spec.Replicas != nil {
+				desired = *deploy.Spec.Replicas
+			}
+			t.Logf("Controller ready: %d/%d replicas", deploy.Status.ReadyReplicas, desired)
 			return true, nil
 		}
 		return false, nil
