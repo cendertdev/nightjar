@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- E2E tests for constraint indexer and ConstraintReport reconciliation — CRUD lifecycle, severity counting, machine-readable validation, cluster-scoped constraint propagation
+- E2E tests for core discovery engine and native K8s adapters (NetworkPolicy, ResourceQuota, LimitRange, WebhookConfiguration, generic CRD, periodic rescan)
 - E2E test infrastructure and harness for Kind cluster testing — shared helpers, testify suite, Makefile targets (`e2e-setup`, `e2e`, `e2e-teardown`)
 - Hubble flow drop streaming — connects to Hubble Relay and streams `verdict=DROPPED` flows for real-time network policy correlation
 - Generic adapter field-path configuration — ConstraintProfile `fieldPaths` enables custom extraction of selectors, namespace selectors, effects, and summaries from arbitrary CRD schemas
