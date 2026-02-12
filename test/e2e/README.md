@@ -3,15 +3,43 @@
 End-to-end tests run against a real Kubernetes cluster to validate Nightjar's
 full lifecycle: constraint discovery, event emission, and workload annotation.
 
+Two cluster backends are supported: **Kind** (isolated, disposable) and
+**Docker Desktop Kubernetes** (shared, no extra install).
+
 ## Prerequisites
 
 - [Docker](https://www.docker.com/products/docker-desktop/) (for building images)
-- [Kind](https://kind.sigs.k8s.io/) (`go install sigs.k8s.io/kind@latest`)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Helm](https://helm.sh/docs/intro/install/) v3+
 - Go 1.25+
 
-## Quick Start
+**Kind only** (optional):
+- [Kind](https://kind.sigs.k8s.io/) (`go install sigs.k8s.io/kind@latest`)
+- WSL2 users: Kind requires cgroup v2. See [Troubleshooting](#kind-fails-on-wsl2).
+
+## Quick Start — Docker Desktop
+
+Docker Desktop's built-in Kubernetes shares the local Docker daemon, so
+locally-built images are available immediately (`pullPolicy=Never`).
+
+```bash
+# 1. Enable Kubernetes in Docker Desktop settings, then verify:
+kubectl cluster-info
+
+# 2. Build images, install CRDs, deploy controller
+make e2e-setup-dd
+
+# 3. Run E2E tests
+make e2e
+
+# 4. Tear down (removes Nightjar, preserves your other workloads)
+make e2e-teardown-dd
+```
+
+## Quick Start — Kind
+
+Kind creates a disposable cluster in Docker containers. Complete isolation,
+clean teardown.
 
 ```bash
 # 1. Build images, create Kind cluster, install CRDs, deploy controller
@@ -20,29 +48,39 @@ make e2e-setup
 # 2. Run E2E tests
 make e2e
 
-# 3. Tear down (deletes Kind cluster and all resources)
+# 3. Tear down (deletes the entire Kind cluster)
 make e2e-teardown
 ```
 
-## What `make e2e-setup` Does
+## Makefile Targets
+
+| Target | Backend | Description |
+|---|---|---|
+| `make e2e-setup-dd` | Docker Desktop | Build images, install CRDs, deploy controller |
+| `make e2e-teardown-dd` | Docker Desktop | Uninstall Helm release, CRDs, test namespaces |
+| `make e2e-setup` | Kind | Create Kind cluster, build/load images, install CRDs, deploy |
+| `make e2e-teardown` | Kind | Delete Kind cluster and all resources |
+| `make e2e` | Any | Run E2E tests (alias for `make test-e2e`) |
+
+### What `make e2e-setup-dd` Does
 
 1. Builds controller and webhook Docker images (`docker-build-all`)
-2. Installs CRDs into the cluster (`kubectl apply -f config/crd/`)
-3. Creates a Kind cluster named `nightjar` (if it doesn't already exist)
+2. Installs CRDs (`kubectl apply -f config/crd/`)
+3. Deploys the controller via Helm with simplified settings:
+   - 1 replica, leader election disabled, webhook disabled
+   - `pullPolicy=Never` (uses locally built image)
+4. Waits up to 120s for the deployment to become ready
+
+### What `make e2e-setup` Does (Kind)
+
+1. Builds controller and webhook Docker images (`docker-build-all`)
+2. Creates a Kind cluster named `nightjar` (if it doesn't already exist)
+3. Installs CRDs into the Kind cluster
 4. Loads Docker images into the Kind cluster
 5. Deploys the controller via Helm with simplified settings:
-   - 1 replica (no HA needed for testing)
-   - Leader election disabled
-   - Admission webhook disabled (avoids certificate complexity)
-   - Image pull policy `IfNotPresent` (uses locally loaded image)
+   - 1 replica, leader election disabled, webhook disabled
+   - `pullPolicy=IfNotPresent` (uses Kind-loaded image)
 6. Waits up to 120s for the deployment to become ready
-
-## What `make e2e-teardown` Does
-
-1. Uninstalls the Helm release
-2. Deletes CRDs from the cluster
-3. Deletes all test namespaces (labeled `nightjar-e2e=true`)
-4. Deletes the Kind cluster
 
 ## Test Structure
 
@@ -70,36 +108,6 @@ The test suite uses `controller-runtime`'s config resolution, which checks
 - **Controller readiness**: 120s wait in `SetupSuite`
 - **Individual wait helpers**: configurable per call, default 60s
 
-## Docker Desktop Alternative
-
-If you prefer Docker Desktop's built-in Kubernetes over Kind:
-
-1. Enable Kubernetes in Docker Desktop settings
-2. Verify: `kubectl cluster-info`
-3. Build images: `make docker-build-all`
-4. Install CRDs: `make install`
-5. Deploy with local images:
-   ```bash
-   helm upgrade --install nightjar deploy/helm/ \
-     --namespace nightjar-system \
-     --create-namespace \
-     --set controller.replicas=1 \
-     --set controller.leaderElect=false \
-     --set controller.image.tag=dev \
-     --set controller.image.pullPolicy=Never \
-     --set admissionWebhook.enabled=false \
-     --wait --timeout 120s
-   ```
-   Note: `pullPolicy=Never` works because Docker Desktop Kubernetes shares the
-   local Docker daemon.
-6. Run tests: `make e2e`
-7. Cleanup:
-   ```bash
-   helm uninstall nightjar -n nightjar-system
-   kubectl delete -f config/crd/
-   kubectl delete ns -l nightjar-e2e=true
-   ```
-
 ## Troubleshooting
 
 **Tests fail with "failed to load kubeconfig"**
@@ -111,9 +119,23 @@ If you prefer Docker Desktop's built-in Kubernetes over Kind:
 - Check pod events: `kubectl describe pod -n nightjar-system -l app.kubernetes.io/component=controller`
 - Check logs: `kubectl logs -n nightjar-system -l app.kubernetes.io/component=controller`
 
-**Image pull errors**
-- Ensure images are loaded into Kind: `kind load docker-image ghcr.io/cendertdev/nightjar:dev --name nightjar`
+**Image pull errors (Docker Desktop)**
+- Ensure `pullPolicy=Never` is set (the `e2e-setup-dd` target handles this)
+- Verify image exists: `docker images | grep nightjar`
+
+**Image pull errors (Kind)**
+- Ensure images are loaded: `kind load docker-image ghcr.io/cendertdev/nightjar:dev --name nightjar`
 - Verify: `docker exec nightjar-control-plane crictl images | grep nightjar`
+
+**Kind fails on WSL2**
+- Kind requires cgroup v2. Check: `cat /sys/fs/cgroup/cgroup.controllers`
+- If you see "No such file or directory", add to `%USERPROFILE%\.wslconfig`:
+  ```
+  [wsl2]
+  kernelCommandLine = cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1
+  ```
+- Then: `wsl --shutdown` and restart
+- Or use Docker Desktop Kubernetes instead: `make e2e-setup-dd`
 
 **Stale test namespaces**
 - Clean up: `kubectl delete ns -l nightjar-e2e=true`

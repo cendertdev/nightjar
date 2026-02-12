@@ -179,6 +179,7 @@ See the [Installation Guide](/nightjar/getting-started/installation/) for macOS,
 | [MCP Server](/nightjar/mcp/) | AI agent integration |
 | [CRDs](/nightjar/crds/) | ConstraintReport, ConstraintProfile, NotificationPolicy |
 | [Reference](/nightjar/reference/) | Constraint types, severity levels |
+| [Contributing](/nightjar/contributing/) | Development setup, E2E testing |
 
 ---
 
