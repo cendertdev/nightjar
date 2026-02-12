@@ -139,8 +139,9 @@ func main() {
 		logger.Fatal("Failed to create clientset", zap.Error(err))
 	}
 
-	// Build constraint indexer with annotator callback
+	// Build constraint indexer with annotator + report reconciler callbacks
 	var annotatorRef atomic.Pointer[notifier.WorkloadAnnotator]
+	var reportReconcilerRef atomic.Pointer[notifier.ReportReconciler]
 	idx := indexer.New(func(event indexer.IndexEvent) {
 		logger.Debug("Index event",
 			zap.String("type", event.Type),
@@ -148,6 +149,9 @@ func main() {
 		)
 		if a := annotatorRef.Load(); a != nil {
 			a.OnIndexChange(event)
+		}
+		if rr := reportReconcilerRef.Load(); rr != nil {
+			rr.OnIndexChange(event)
 		}
 	})
 
@@ -236,6 +240,7 @@ func main() {
 		mgr.GetClient(), idx, logger, reconcilerOpts,
 		reconcilerEvaluator, dynamicClient,
 	)
+	reportReconcilerRef.Store(reportReconciler)
 
 	// Add runnable to start discovery engine
 	if err := mgr.Add(&runnableFunc{fn: func(ctx context.Context) error {
