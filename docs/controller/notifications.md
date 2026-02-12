@@ -416,6 +416,12 @@ curl -X POST -H 'Content-type: application/json' \
 kubectl logs -n nightjar-system -l app=nightjar-controller | grep "slack"
 ```
 
+### Cluster-Scoped Constraints
+
+Cluster-scoped constraints (e.g., `ValidatingWebhookConfiguration`, Gatekeeper `ConstraintTemplate` instances) affect all namespaces. When a cluster-scoped constraint has explicit `AffectedNamespaces`, only those namespaces are updated. When it has none, Nightjar triggers a cluster-wide reconciliation: it lists all namespaces and updates the ConstraintReport and workload annotations in each.
+
+This applies to both ConstraintReport reconciliation and workload annotation. Debounce timers prevent excessive reconciliation from rapid cluster-scoped changes.
+
 ### ConstraintReports Not Updating
 
 ```bash
