@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- E2E tests for Kyverno adapter — ClusterPolicy and Policy discovery, Enforce/Audit severity mapping, multi-rule parsing, match clause parsing (any/all), mutate/generate Info severity, deletion lifecycle
+- E2E setup/teardown (`e2e-setup`, `e2e-setup-dd`) now installs and removes Kyverno as a test dependency
 - E2E tests for Gatekeeper adapter — constraint discovery, enforcement action mapping, match block parsing, multi-template dynamic discovery, constraint deletion lifecycle
 - E2E setup/teardown (`e2e-setup`, `e2e-setup-dd`) now installs and removes Gatekeeper as a test dependency
 - E2E tests for admission webhook warnings — deployment readiness, constraint warning capture, fail-open behavior, self-signed TLS certificate injection, PDB enforcement

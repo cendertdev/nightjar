@@ -281,7 +281,7 @@ func (e *Engine) startInformer(ctx context.Context, gvr schema.GroupVersionResou
 			e.handleUpdate(ctx, gvr, newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			e.handleDelete(gvr, obj)
+			e.handleDelete(ctx, gvr, obj)
 		},
 	}); err != nil {
 		e.logger.Error("Failed to add event handler", zap.String("gvr", gvr.String()), zap.Error(err))
@@ -337,7 +337,10 @@ func (e *Engine) handleUpdate(ctx context.Context, gvr schema.GroupVersionResour
 }
 
 // handleDelete processes a deleted object.
-func (e *Engine) handleDelete(gvr schema.GroupVersionResource, obj interface{}) {
+// It parses the object to obtain constraint UIDs (which may differ from the
+// source object UID when an adapter maps one object to multiple constraints,
+// e.g. Kyverno rules) and removes each from the indexer.
+func (e *Engine) handleDelete(ctx context.Context, gvr schema.GroupVersionResource, obj interface{}) {
 	unstructuredObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		// Handle deleted final state unknown (tombstone)
@@ -352,7 +355,19 @@ func (e *Engine) handleDelete(gvr schema.GroupVersionResource, obj interface{}) 
 		}
 	}
 
-	e.indexer.Delete(unstructuredObj.GetUID())
+	// Parse the deleted object to discover all constraint UIDs it produced.
+	// Adapters like Kyverno generate synthetic UIDs (one per rule), so
+	// deleting only by source UID would miss them.
+	constraints, err := e.parseObject(ctx, gvr, unstructuredObj)
+	if err != nil || len(constraints) == 0 {
+		// Fallback: delete by source object UID (works for 1:1 adapters).
+		e.indexer.Delete(unstructuredObj.GetUID())
+		return
+	}
+
+	for _, c := range constraints {
+		e.indexer.Delete(c.UID)
+	}
 }
 
 // parseObject routes the object to the appropriate adapter.
@@ -610,7 +625,7 @@ func (e *Engine) startProfileInformer(gvr schema.GroupVersionResource, stopCh ch
 			e.handleUpdate(ctx, gvr, newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			e.handleDelete(gvr, obj)
+			e.handleDelete(ctx, gvr, obj)
 		},
 	}); err != nil {
 		e.logger.Error("Failed to add event handler for profile informer",

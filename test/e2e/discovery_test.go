@@ -16,7 +16,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -25,8 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/rand"
-
-	"github.com/nightjarctl/nightjar/internal/annotations"
 )
 
 // TestNetworkPolicyDiscovery verifies that deploying a NetworkPolicy causes
@@ -64,20 +61,20 @@ func (s *E2ESuite) TestNetworkPolicyDiscovery() {
 		}, ns, "e2e-deny-egress")
 	})
 
-	// Wait for workload annotation to appear.
-	constraints := getWorkloadConstraints(t, s.dynamicClient, ns, sentinelName, 90*time.Second)
-	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment")
-
-	// Verify at least one NetworkEgress constraint exists.
-	found := false
+	// Wait for the specific NetworkEgress constraint to appear in annotations.
+	// Using waitForConstraintMatch instead of getWorkloadConstraints to avoid
+	// returning stale data when cluster-scoped constraints already populate
+	// the annotation before this test's NetworkPolicy is indexed.
+	constraints := waitForConstraintMatch(t, s.dynamicClient, ns, sentinelName, 90*time.Second, func(c constraintSummary) bool {
+		return c.Type == "NetworkEgress"
+	})
+	require.NotEmpty(t, constraints, "expected NetworkEgress constraint in workload annotations")
 	for _, c := range constraints {
 		if c.Type == "NetworkEgress" {
-			found = true
 			t.Logf("Found NetworkEgress constraint: name=%s source=%s", c.Name, c.Source)
 			break
 		}
 	}
-	require.True(t, found, "expected NetworkEgress constraint in workload annotations, got: %+v", constraints)
 }
 
 // TestResourceQuotaDiscovery verifies that deploying a ResourceQuota causes a
@@ -651,22 +648,18 @@ func (s *E2ESuite) TestPeriodicRescanDiscovery() {
 	// Wait for the generic adapter to pick it up and annotate the workload.
 	// Use a longer timeout (120s) to cover up to two rescan cycles plus
 	// informer sync and annotation processing time.
+	// Using waitForConstraintMatch to poll until the specific constraint
+	// appears, avoiding stale reads when cluster-scoped constraints already
+	// populate the annotation.
 	t.Log("Waiting for periodic rescan to discover the new CRD and index the CR...")
-	raw := waitForWorkloadAnnotation(t, s.dynamicClient, ns, sentinelName,
-		annotations.WorkloadConstraints, 120*time.Second)
-
-	var constraints []constraintSummary
-	require.NoError(t, json.Unmarshal([]byte(raw), &constraints),
-		"failed to parse constraints JSON: %s", raw)
-	require.NotEmpty(t, constraints, "no constraints found on sentinel deployment after rescan")
-
-	found := false
+	constraints := waitForConstraintMatch(t, s.dynamicClient, ns, sentinelName, 120*time.Second, func(c constraintSummary) bool {
+		return c.Source == "securitypolicies"
+	})
+	require.NotEmpty(t, constraints, "no securitypolicies constraint found on sentinel deployment after rescan")
 	for _, c := range constraints {
 		if c.Source == "securitypolicies" {
-			found = true
 			t.Logf("Found constraint from generic adapter: type=%s name=%s source=%s", c.Type, c.Name, c.Source)
 			break
 		}
 	}
-	require.True(t, found, "expected constraint from securitypolicies (generic adapter), got: %+v", constraints)
 }
