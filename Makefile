@@ -53,6 +53,13 @@ e2e-setup: docker-build-all ## Create Kind cluster, load images, deploy controll
 		--namespace gatekeeper-system \
 		--create-namespace \
 		--wait --timeout 120s
+	@echo "--- Installing Kyverno ---"
+	@helm repo add kyverno https://kyverno.github.io/kyverno/ 2>/dev/null || true
+	@helm repo update kyverno
+	helm upgrade --install kyverno kyverno/kyverno \
+		--namespace kyverno-system \
+		--create-namespace \
+		--wait --timeout 120s
 	@echo "--- Installing Nightjar ---"
 	helm upgrade --install nightjar deploy/helm/ \
 		--namespace nightjar-system \
@@ -75,6 +82,8 @@ e2e: test-e2e ## Alias for test-e2e
 .PHONY: e2e-teardown
 e2e-teardown: ## Tear down E2E environment (Kind cluster, CRDs, deps, test namespaces)
 	-helm uninstall nightjar --namespace nightjar-system 2>/dev/null
+	-helm uninstall kyverno --namespace kyverno-system 2>/dev/null
+	-kubectl delete ns kyverno-system 2>/dev/null
 	-helm uninstall gatekeeper --namespace gatekeeper-system 2>/dev/null
 	-kubectl delete ns gatekeeper-system 2>/dev/null
 	-kubectl delete -f config/crd/ 2>/dev/null
@@ -89,6 +98,13 @@ e2e-setup-dd: docker-build-all ## Deploy controller + deps for E2E on Docker Des
 	@helm repo update gatekeeper
 	helm upgrade --install gatekeeper gatekeeper/gatekeeper \
 		--namespace gatekeeper-system \
+		--create-namespace \
+		--wait --timeout 120s
+	@echo "--- Installing Kyverno ---"
+	@helm repo add kyverno https://kyverno.github.io/kyverno/ 2>/dev/null || true
+	@helm repo update kyverno
+	helm upgrade --install kyverno kyverno/kyverno \
+		--namespace kyverno-system \
 		--create-namespace \
 		--wait --timeout 120s
 	@echo "--- Installing Nightjar ---"
@@ -110,6 +126,8 @@ e2e-setup-dd: docker-build-all ## Deploy controller + deps for E2E on Docker Des
 .PHONY: e2e-teardown-dd
 e2e-teardown-dd: ## Tear down E2E environment on Docker Desktop Kubernetes
 	-helm uninstall nightjar --namespace nightjar-system 2>/dev/null
+	-helm uninstall kyverno --namespace kyverno-system 2>/dev/null
+	-kubectl delete ns kyverno-system 2>/dev/null
 	-helm uninstall gatekeeper --namespace gatekeeper-system 2>/dev/null
 	-kubectl delete ns gatekeeper-system 2>/dev/null
 	-kubectl delete -f config/crd/ 2>/dev/null
