@@ -418,7 +418,7 @@ func TestHandleDelete(t *testing.T) {
 		},
 	}
 
-	engine.handleDelete(gvr, obj)
+	engine.handleDelete(context.Background(), gvr, obj)
 
 	// Constraint should be removed
 	assert.Empty(t, idx.All())
@@ -454,7 +454,7 @@ func TestHandleDelete_Tombstone(t *testing.T) {
 		Obj: obj,
 	}
 
-	engine.handleDelete(gvr, tombstone)
+	engine.handleDelete(context.Background(), gvr, tombstone)
 
 	// Constraint should be removed
 	assert.Empty(t, idx.All())
@@ -466,7 +466,7 @@ func TestHandleDelete_NonUnstructured(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "test.io", Version: "v1", Resource: "things"}
 
 	// Pass a non-unstructured object — should not panic
-	engine.handleDelete(gvr, "not-an-unstructured")
+	engine.handleDelete(context.Background(), gvr, "not-an-unstructured")
 }
 
 func TestHandleDelete_TombstoneNonUnstructured(t *testing.T) {
@@ -481,7 +481,7 @@ func TestHandleDelete_TombstoneNonUnstructured(t *testing.T) {
 	}
 
 	// Should not panic
-	engine.handleDelete(gvr, tombstone)
+	engine.handleDelete(context.Background(), gvr, tombstone)
 }
 
 func TestScan(t *testing.T) {
